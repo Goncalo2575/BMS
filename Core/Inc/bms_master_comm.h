@@ -1,22 +1,20 @@
 /**
  * @file    bms_master_comm.h
- * @brief   BMS → Master (VCU) Communication Module
+ * @brief   BMS → Saída de DEBUG (USART2, PA2/PA3) — TX-only
  *
- *  Interface dedicada (USART3, distinta da USART2 do BQ79600) para envio
- *  cíclico de telemetria e recepção de Heartbeat da VCU.
+ *  Arquitectura CENTRALIZADA: não há VCU externa nem heartbeat.
+ *  Esta interface envia periodicamente (1 Hz) uma linha de texto legível
+ *  com o estado essencial do BMS para um terminal/registador ligado a
+ *  PA2 (USART2_TX). O pino PA3 (USART2_RX) fica livre — reservado para
+ *  comandos simples futuros (ex.: pedir status), mas NÃO é usado nem
+ *  monitorizado (sem recepção por interrupção, sem watchdog).
  *
- *  PROTOCOLO:
- *  ┌──────────┬─────────────────────────────────────────────────┬───────┐
- *  │ BMS→VCU │ Pacote de 22 bytes a cada 100 ms (cyclic TX)    │ UART3 │
- *  │ VCU→BMS │ Heartbeat: 1 byte (0x55) a cada ≤ 500 ms       │ UART3 │
- *  └──────────┴─────────────────────────────────────────────────┴───────┘
+ *  Toda a segurança (protecção térmica, OV/UV, contactor, NFAULT) é
+ *  interna ao STM32; a ausência deste link NUNCA provoca falha.
  *
- *  WATCHDOG: Se não receber Heartbeat em MASTER_HB_TIMEOUT_MS (500 ms),
- *  o BMS transita para FAULT e abre os contactores.
- *
- *  PINOUT UART3 (ajustar conforme hardware):
- *    PB10 (USART3_TX) ──► Master RX
- *    PB11 (USART3_RX) ◄── Master TX (Heartbeat)
+ *  PINOUT USART2:
+ *    PA2 (USART2_TX) ──► terminal de debug / registador
+ *    PA3 (USART2_RX) ◄── (livre)
  *    Baud: 115200, 8N1
  */
 
@@ -26,73 +24,27 @@
 #include "bq796xx_bms.h"
 
 /* =========================================================================
- * CONFIGURAÇÃO DO PROTOCOLO
- * ========================================================================= */
-#define TELEMETRY_HEADER_1      0xBEU   /* Marcador de início byte 1 */
-#define TELEMETRY_HEADER_2      0xEFU   /* Marcador de início byte 2 */
-#define TELEMETRY_FOOTER        0xAAU   /* Marcador de fim */
-#define MASTER_HEARTBEAT_BYTE   0x55U   /* Byte de heartbeat da VCU */
-#define MASTER_HB_TIMEOUT_MS    500U    /* Timeout para perda de ligação */
-#define MASTER_UART_BAUD        115200U
-
-/* =========================================================================
- * ESTRUTURA DO PACOTE DE TELEMETRIA
- * =========================================================================
- * Payload mínimo exigido:
- *   BMS_STATE       — máquina de estados (para diagnóstico VCU)
- *   FAULT_FLAGS     — flags de erro (para luzes de aviso painel)
- *   PACK_VOLTAGE    — tensão total do pack (para torque derating)
- *   MIN/MAX CELL    — tensões extremas (para limites de corrente)
- *   MAX_TEMP        — temperatura máxima (para torque derating térmico)
- *   PRECHARGE_READY — autorização de fecho do contactor principal
- *   BALANCE_ACTIVE  — estado do balanceamento (informativo)
- *   INVERTER_V      — tensão no lado do inversor (pré-carga)
- *
- * Checksum: XOR acumulado de todos os bytes desde HEADER_1 até INVERTER_V. */
-#pragma pack(push, 1)
-typedef struct {
-    uint8_t  header[2];          /* TELEMETRY_HEADER_1, TELEMETRY_HEADER_2 */
-    uint8_t  bms_state;          /* BMS_State_t (1 byte) */
-    uint32_t fault_flags;        /* OR de todos os fault flags */
-    uint32_t pack_voltage_mv;    /* Tensão total em mV — 30S max = 108 000 mV > UINT16_MAX */
-    uint16_t min_cell_mv;        /* Menor tensão celular */
-    uint16_t max_cell_mv;        /* Maior tensão celular */
-    int8_t   max_temp_c;         /* Temperatura máxima em °C */
-    uint8_t  precharge_ready;    /* 1 se tensão HV >= limiar */
-    uint8_t  balance_active;     /* 1 se balanceamento em curso */
-    uint16_t inverter_voltage_v; /* Tensão inversor em décimas de V (×10) */
-    uint8_t  checksum;           /* XOR de todos os bytes anteriores */
-    uint8_t  footer;             /* TELEMETRY_FOOTER */
-} BMS_TelemetryPacket_t;
-#pragma pack(pop)
-
-/* Tamanho do pacote (verificar = sizeof(BMS_TelemetryPacket_t)) */
-#define TELEMETRY_PACKET_SIZE   ((uint16_t)sizeof(BMS_TelemetryPacket_t))
-
-/* =========================================================================
- * HANDLE DO MÓDULO DE COMUNICAÇÃO
+ * HANDLE DO MÓDULO DE DEBUG
  * ========================================================================= */
 typedef struct {
-    UART_HandleTypeDef  *huart;          /* Handle USART3 */
-    uint32_t             last_hb_tick;   /* Timestamp do último heartbeat (ms) */
-    bool                 link_ok;        /* TRUE: ligação activa */
-    uint32_t             tx_count;       /* Pacotes enviados */
-    uint32_t             hb_timeout_count; /* Timeouts de heartbeat */
-    volatile uint8_t     hb_rx_buf[1];  /* Buffer RX para heartbeat */
+    UART_HandleTypeDef  *huart;     /* Handle USART2 (TX de debug) */
+    uint32_t             tx_count;  /* Nº de linhas de debug enviadas */
 } BMS_MasterComm_t;
 
 /* =========================================================================
- * PROTÓTIPOS
+ * API PÚBLICA
  * ========================================================================= */
-void         BMS_MasterComm_Init(BMS_MasterComm_t *hcomm,
-                                  UART_HandleTypeDef *huart3);
-void         BMS_MasterComm_Task_100ms(BMS_MasterComm_t *hcomm,
-                                        BMS_Handle_t *hbms);
-bool         BMS_MasterComm_IsLinkOk(BMS_MasterComm_t *hcomm);
-uint8_t      BMS_MasterComm_CalcChecksum(uint8_t *data, uint16_t len);
 
-/* Callback a chamar no HAL_UART_RxCpltCallback para USART3 */
-void         BMS_MasterComm_RxCallback(BMS_MasterComm_t *hcomm,
-                                        UART_HandleTypeDef *huart);
+/**
+ * @brief  Inicializa a saída de debug. Apenas guarda o handle do USART2.
+ *         NÃO arma qualquer recepção (TX-only). Chamar após MX_USART2_UART_Init().
+ */
+void BMS_MasterComm_Init(BMS_MasterComm_t *hcomm, UART_HandleTypeDef *huart2);
+
+/**
+ * @brief  Envia uma linha de debug legível com o estado essencial do BMS.
+ *         Bloqueante (HAL_UART_Transmit, sem DMA). Chamar a 1 Hz.
+ */
+void BMS_MasterComm_PrintDebug(BMS_MasterComm_t *hcomm, BMS_Handle_t *hbms);
 
 #endif /* BMS_MASTER_COMM_H */

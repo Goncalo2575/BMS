@@ -13,10 +13,10 @@
 ../Core/Src/bq796xx_bms_monitor.c:838:6:BMS_EmergencyShutdown	1
 ../Core/Src/bq796xx_bms_monitor.c:878:14:BMS_Task_100ms	13
 ../Core/Src/bq796xx_bms_monitor.c:995:13:BMS_GetStateString	10
-../Core/Src/bq796xx_bms_monitor.c:1015:13:BMS_GetFaultString	11
-../Core/Src/bq796xx_bms_monitor.c:1066:14:BMS_SetCellBalancing	1
-../Core/Src/bq796xx_bms_monitor.c:1084:14:BMS_StopAllBalancing	3
-../Core/Src/bq796xx_bms_monitor.c:1116:14:BMS_RunPassiveBalancing	16
-../Core/Src/bq796xx_bms_monitor.c:1204:6:BMS_UpdateHardwareInterlocks	5
-../Core/Src/bq796xx_bms_monitor.c:1240:6:BMS_ApplyVoltageFilter	4
-../Core/Src/bq796xx_bms_monitor.c:1312:9:BMS_EstimateSoC	6
+../Core/Src/bq796xx_bms_monitor.c:1015:13:BMS_GetFaultString	10
+../Core/Src/bq796xx_bms_monitor.c:1065:14:BMS_SetCellBalancing	1
+../Core/Src/bq796xx_bms_monitor.c:1083:14:BMS_StopAllBalancing	3
+../Core/Src/bq796xx_bms_monitor.c:1115:14:BMS_RunPassiveBalancing	16
+../Core/Src/bq796xx_bms_monitor.c:1203:6:BMS_UpdateHardwareInterlocks	5
+../Core/Src/bq796xx_bms_monitor.c:1239:6:BMS_ApplyVoltageFilter	4
+../Core/Src/bq796xx_bms_monitor.c:1311:9:BMS_EstimateSoC	6

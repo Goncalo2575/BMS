@@ -13,8 +13,8 @@
  *  │  PB12 (GPIO_OUT PP)  ──────► Contactor Gate Driver          │
  *  │  PB13 (GPIO_OUT PP)  ──────► BMS_OK (interlock VCU)         │
  *  │  PB14 (GPIO_OUT PP)  ──────► PRECHARGE_OK (interlock VCU)   │
- *  │  PB15 (GPIO_IN  PD)  ◄────── Contactor aux (weld detect)    │
- *  │  PB10 (USART3_TX) ──► VCU RX   PB11 (USART3_RX) ◄── VCU TX  │
+ *  │  PA2  (USART2_TX) ──► Debug TX-only (terminal/registador)   │
+ *  │  PA3  (USART2_RX) ── livre (reservado p/ comandos futuros)  │
  *  │  TIM2 (free-running µs + 100 ms tick)                       │
  *  │  DMA1 (UART4_TX)   DMA1 (UART4_RX)                          │
  *  └──────────────────────────────────────────────────────────────┘
@@ -23,7 +23,7 @@
  *    UART4  -> Asynchronous (NÃO Half-Duplex)
  *    UART4  -> Baud Rate: 1000000, Word Length: 8, Parity: None, Stop: 1
  *    DMA    -> UART4_RX e UART4_TX em modo Normal
- *    USART3 -> Asynchronous, 115200 8N1 (telemetria + heartbeat VCU)
+ *    USART2 -> Asynchronous, 115200 8N1 (debug TX-only, PA2/PA3)
  *    TIM2   -> Internal Clock, free-running 1 µs/tick + interrupção 100 ms
  *    EXTI13 -> GPIO_EXTI13, Falling edge, Pull-up, Priority 0 (máxima)
  *    HAL Timebase Source -> TIM6 (não TIM2 — evitar conflito)
@@ -54,7 +54,7 @@ BMS_MasterComm_t g_master_comm;
 
 /* Handles HAL */
 extern UART_HandleTypeDef  huart4;   /* UART4 — BQ79600 bridge (PA0/PA1) */
-extern UART_HandleTypeDef  huart3;   /* USART3 — Master/VCU (telemetria + heartbeat) */
+extern UART_HandleTypeDef  huart2;   /* USART2 (PA2/PA3) — Telemetria externa passiva */
 extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs */
 
 /* Flag de ciclo de 100 ms (set por timer interrupt ou SysTick) */
@@ -63,53 +63,6 @@ static volatile bool g_tick_100ms = false;
 /* =========================================================================
  * FUNÇÕES DE APOIO À APLICAÇÃO
  * ========================================================================= */
-
-/**
- * @brief  Imprime sumário do estado do BMS via UART de debug
- *         Na prática usar ITM printf ou UART3/LPUART para debug
- */
-static void BMS_PrintStatus(BMS_Handle_t *hbms)
-{
-    /* Na plataforma real, redirigir para UART de debug ou ITM */
-    /* Exemplo com printf (requer retargeting de _write) */
-    printf("\r\n=== BMS STATUS ===\r\n");
-    printf("State     : %s\r\n", BMS_GetStateString(hbms->state));
-    printf("Fault     : %s (0x%08lX)\r\n",
-           BMS_GetFaultString(hbms->fault_flags), hbms->fault_flags);
-    printf("Pack V    : %lu mV\r\n", hbms->pack_voltage_mv);
-    printf("Min Cell  : %u mV\r\n", hbms->min_cell_mv);
-    printf("Max Cell  : %u mV\r\n", hbms->max_cell_mv);
-    printf("Delta     : %u mV\r\n", hbms->delta_cell_mv);
-    printf("Max Temp  : %d degC\r\n", hbms->max_temp_c);
-    printf("SoC       : %u%%\r\n", (unsigned)hbms->soc_percent);
-    printf("HV Bus    : %lu mV (precharge %s)\r\n",
-           hbms->inverter_voltage_mv,
-           hbms->precharge_ready ? "READY" : "not ready");
-    printf("Ring OK   : %s\r\n", hbms->ring_intact ? "YES" : "NO");
-    printf("Contactor : %s\r\n", hbms->contactor_closed ? "CLOSED" : "OPEN");
-
-    for (uint8_t s = 0U; s < BMS_NUM_SLAVES; s++)
-    {
-        printf("\r\n  Slave %u (Addr 0x%02X):\r\n", s + 1U,
-               hbms->slave[s].address);
-        for (uint8_t c = 0U; c < BMS_CELLS_PER_SLAVE; c++)
-        {
-            printf("    Cell%02u: %4u mV%s%s\r\n",
-                   c + 1U,
-                   hbms->slave[s].cell_voltage_mv[c],
-                   hbms->slave[s].ov_cell[c] ? " [OV]" : "",
-                   hbms->slave[s].uv_cell[c] ? " [UV]" : "");
-        }
-        printf("    Temp  : %d/%d/%d degC\r\n",
-               hbms->slave[s].temperatures_c[0],
-               hbms->slave[s].temperatures_c[1],
-               hbms->slave[s].temperatures_c[2]);
-    }
-    printf("Comm Errs : %lu | CRC Errs: %lu\r\n",
-           hbms->comm_error_count, hbms->crc_error_count);
-    printf("Ring Recs : %lu\r\n", hbms->ring_recovery_count);
-    printf("==================\r\n");
-}
 
 /**
  * @brief  Lógica de controlo do contactor baseada no estado do BMS
@@ -360,9 +313,10 @@ void BMS_Main(void)
     if (status != BMS_OK)
     {
         printf("[BMS] FATAL: Initialization failed! Code: %d\r\n", (int)status);
+        /* Falha fatal de inicialização: contactor permanece aberto (estado de
+         * reset). Sem LED de estado — o halt é silencioso. */
         while (1U)
         {
-            HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
             BMS_DelayMs(200U);
         }
     }
@@ -372,11 +326,10 @@ void BMS_Main(void)
     printf("[BMS] Ring intact: %s\r\n", g_bms.ring_intact ? "YES" : "NO");
 
     /* ------------------------------------------------------------------
-     * FASE 1b: Inicializar comunicação com a VCU (USART3)
+     * FASE 1b: Inicializar saída de debug (USART2, PA2/PA3, TX-only)
      * ------------------------------------------------------------------ */
-    BMS_MasterComm_Init(&g_master_comm, &huart3);
-    printf("[BMS] Master comm init OK (USART3, watchdog=%u ms)\r\n",
-           MASTER_HB_TIMEOUT_MS);
+    BMS_MasterComm_Init(&g_master_comm, &huart2);
+    printf("[BMS] Debug output init OK (USART2 PA2/PA3, TX-only)\r\n");
 
     /* ------------------------------------------------------------------
      * FASE 1c: IWDG Watchdog (ASIL-D)
@@ -454,14 +407,6 @@ void BMS_Main(void)
         status = BMS_Task_100ms(&g_bms);
 
         /* ----------------------------------------------------------
-         * TAREFA DE COMUNICAÇÃO COM A VCU @ 100 ms
-         * Envia pacote de telemetria e verifica watchdog do heartbeat.
-         * Deve ser chamada APÓS BMS_Task_100ms para que os dados
-         * enviados reflictam o estado mais recente do ciclo actual.
-         * ---------------------------------------------------------- */
-        BMS_MasterComm_Task_100ms(&g_master_comm, &g_bms);
-
-        /* ----------------------------------------------------------
          * GESTÃO DO CONTACTOR
          * A barreira nfault_pending em BMS_ContactorControl e em
          * BMS_ContactorClose garante que não há fecho indevido mesmo
@@ -490,59 +435,15 @@ void BMS_Main(void)
         }
 
         /* ----------------------------------------------------------
-         * DEBUG PRINT @ 1 Hz (a cada 10 ciclos de 100 ms)
+         * SAÍDA DE DEBUG @ 1 Hz (a cada 10 ciclos de 100 ms)
+         * Linha de texto legível por USART2 (PA2, TX-only). Não há
+         * VCU nem heartbeat — a ausência de leitor nunca causa falha.
          * ---------------------------------------------------------- */
         debug_print_div++;
         if (debug_print_div >= 10U)
         {
             debug_print_div = 0U;
-            BMS_PrintStatus(&g_bms);
-        }
-
-        /* ----------------------------------------------------------
-         * SINALIZAÇÃO LED STATUS
-         * ---------------------------------------------------------- */
-        switch (g_bms.state)
-        {
-            case BMS_STATE_MONITORING:
-            case BMS_STATE_BALANCING:
-                if (debug_print_div == 0U)
-                {
-                    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-                }
-                break;
-
-            case BMS_STATE_FAULT:
-                HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-                break;
-
-            case BMS_STATE_RING_RECOVERY:
-                /* BUG-07 CORRIGIDO: BMS_DelayMs(50) removido.
-                 * O delay bloqueante de 50 ms no superloop atrasava o
-                 * processamento de faults e o watchdog da VCU em cada
-                 * ciclo durante o ring recovery. Substituído por toggle
-                 * simples — o período de 100 ms já providencia visibilidade. */
-                HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-                break;
-
-            default:
-                break;
-        }
-
-        /* ----------------------------------------------------------
-         * DETECÇÃO DE SOLDADURA DO CONTACTOR (não-bloqueante)
-         * Executa em TODOS os estados, MAS apenas quando o contactor
-         * deveria estar aberto. Com contactor fechado (condução normal),
-         * o pin auxiliar está naturalmente HIGH → seria falso positivo.
-         * ---------------------------------------------------------- */
-        if (!g_bms.contactor_closed)
-        {
-            if (BMS_CheckContactorWeld())
-            {
-                g_bms.contactor_weld_detected = true;
-                g_bms.fault_flags |= BMS_FAULT_CONTACTOR;
-                g_bms.state = BMS_STATE_FAULT;
-            }
+            BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
         }
 
         /* ----------------------------------------------------------

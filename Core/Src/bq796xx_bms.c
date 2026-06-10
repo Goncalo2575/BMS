@@ -15,7 +15,6 @@
  */
 
 #include "bq796xx_bms.h"
-#include "bms_master_comm.h"
 
 /* =========================================================================
  * VARIÁVEIS ESTÁTICAS E DECLARAÇÕES EXTERNAS DE ÂMBITO DE FICHEIRO
@@ -25,10 +24,8 @@
  *   - o compilador reavalia a ligação em cada invocação da função (ISR)
  *   - dificulta a análise estática (linters, MISRA C Rule 8.5)
  *   - oculta dependências que devem ser visíveis ao nível do módulo
- * Aqui: g_hbms_irq é definido neste ficheiro (static); g_master_comm é
- * definido em main_bms_app.c e partilhado pelo callback unificado. */
+ * Aqui: g_hbms_irq é definido neste ficheiro (static). */
 static BMS_Handle_t    *g_hbms_irq   = NULL;
-extern BMS_MasterComm_t g_master_comm;
 
 /* =========================================================================
  * SECÇÃO 1: UTILITÁRIOS - DELAY E CRC
@@ -115,8 +112,8 @@ uint16_t BMS_CalculateCRC16(uint8_t *data, uint16_t length)
  *  TOPOLOGIA FÍSICA: Full-Duplex Standard Asynchronous (PA0=TX, PA1=RX, UART4)
  *  Configuração CubeMX obrigatória:
  *    UART4 -> Mode: Asynchronous  (NÃO Half-Duplex — ver nota abaixo)
- *    DMA RX -> DMA2 Stream5, Normal, Low priority, Byte
- *    DMA TX -> DMA1 Stream6, Normal, Low priority, Byte
+ *    DMA RX -> DMA1 Stream2, Normal, Low priority, Byte
+ *    DMA TX -> DMA1 Stream4, Normal, Low priority, Byte
  *    NVIC   -> DMA RX TC interrupt habilitado
  *
  *  NOTA HALF-DUPLEX vs FULL-DUPLEX:
@@ -233,20 +230,10 @@ static BMS_Status_t BMS_Transceive(BMS_Handle_t *hbms,
 }
 
 /**
- * @brief  Callback HAL unificado — router para UART4 (bridge) e USART3 (VCU)
+ * @brief  Callback HAL para a recepção DMA do BQ79600 (UART4)
  *
- *  Este callback substitui a implementação __weak do HAL e serve
- *  dois periféricos em simultâneo:
- *
- *  ┌─────────────────────────────────────────────────────────────────┐
- *  │ UART4  (BQ79600 DMA RX)    → sinaliza dma_rx_done = true      │
- *  │ USART3 (Master/VCU HB IT)  → delega para BMS_MasterComm_RxCB  │
- *  └─────────────────────────────────────────────────────────────────┘
- *
- *  ROUTING: o ponteiro huart identifica univocamente o periférico.
- *  Não usar if-else encadeados — ambos os blocos são independentes
- *  para que um callback inválido (outro periférico UART) seja ignorado
- *  sem afectar o estado dos dois drivers.
+ *  Substitui a implementação __weak do HAL. Sinaliza dma_rx_done quando
+ *  o bloco DMA RX da bridge termina (Transfer Complete).
  *
  *  Integração CubeMX:
  *    O CubeMX gera HAL_UART_RxCpltCallback como __weak.
@@ -257,16 +244,12 @@ static BMS_Status_t BMS_Transceive(BMS_Handle_t *hbms,
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    /* --- 1. UART4: BQ79600 DMA Transfer Complete --- */
+    /* UART4: BQ79600 DMA Transfer Complete.
+     * (A telemetria de debug em USART2 é TX-only — sem recepção IT,
+     *  por isso este callback só serve a bridge.) */
     if ((g_hbms_irq != NULL) && (huart == g_hbms_irq->huart))
     {
         __atomic_store_n(&g_hbms_irq->dma_rx_done, 1U, __ATOMIC_SEQ_CST);
-    }
-
-    /* --- 2. USART3: Master/VCU Heartbeat (IT, 1 byte) --- */
-    if ((g_master_comm.huart != NULL) && (huart == g_master_comm.huart))
-    {
-        BMS_MasterComm_RxCallback(&g_master_comm, huart);
     }
 }
 
@@ -1079,38 +1062,6 @@ void BMS_CommClear(BMS_Handle_t *hbms)
     /* Reinicializar UART */
     HAL_UART_Init(hbms->huart);
     BMS_DelayUs(hbms, 50U);  /* Estabilização pós-UART init */
-}
-
-/* =========================================================================
- * SECÇÃO: DETECÇÃO DE SOLDADURA DO CONTACTOR (NÃO-BLOQUEANTE)
- * =========================================================================
- * AUDITORIA v3.1: A versão anterior usava 3 leituras com 15 ms de delay
- * cada (45 ms bloqueante), consumindo quase metade do ciclo de 100 ms.
- * Isto induzia jitter na telemetria e podia disparar falsos alarmes no
- * watchdog da VCU.
- *
- * CORRECÇÃO: paradigma não-bloqueante com máquina de estados finita.
- * A cada ciclo de 100 ms lê-se o pin UMA vez (0 µs de delay bloqueante).
- * Três ciclos consecutivos com leitura HIGH → soldadura confirmada.
- * Uma leitura LOW reinicia o contador — debounce natural pelo período
- * do superloop (100 ms >> tempo de bounce mecânico de ~2 ms). */
-
-bool BMS_CheckContactorWeld(void)
-{
-    /* Variável estática: persiste entre chamadas — conta ciclos consecutivos */
-    static uint8_t consecutive_high = 0U;
-
-    if (HAL_GPIO_ReadPin(CONTACTOR_WELD_PORT, CONTACTOR_WELD_PIN) == GPIO_PIN_SET)
-    {
-        if (consecutive_high < 255U) { consecutive_high++; }
-    }
-    else
-    {
-        consecutive_high = 0U;   /* Reset: pin LOW → contactor abriu correctamente */
-    }
-
-    /* Maioria 3/3: três ciclos consecutivos (300 ms) com pin HIGH → weld */
-    return (consecutive_high >= 3U);
 }
 
 /* =========================================================================

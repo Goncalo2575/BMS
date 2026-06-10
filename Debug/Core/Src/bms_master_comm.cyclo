@@ -1,6 +1,2 @@
-../Core/Src/bms_master_comm.c:22:9:BMS_MasterComm_CalcChecksum	2
-../Core/Src/bms_master_comm.c:35:13:BMS_MasterComm_BuildPacket	3
-../Core/Src/bms_master_comm.c:72:6:BMS_MasterComm_Init	3
-../Core/Src/bms_master_comm.c:99:6:BMS_MasterComm_Task_100ms	5
-../Core/Src/bms_master_comm.c:148:6:BMS_MasterComm_IsLinkOk	3
-../Core/Src/bms_master_comm.c:165:6:BMS_MasterComm_RxCallback	4
+../Core/Src/bms_master_comm.c:14:6:BMS_MasterComm_Init	3
+../Core/Src/bms_master_comm.c:23:6:BMS_MasterComm_PrintDebug	8

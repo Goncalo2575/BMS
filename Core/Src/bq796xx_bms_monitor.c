@@ -948,8 +948,8 @@ BMS_Status_t BMS_Task_100ms(BMS_Handle_t *hbms)
     /* --- Filtro IIR (APÓS protecções — apenas para telemetria e display) ---
      * Os dados filtrados são usados por:
      *   - BMS_RunPassiveBalancing (decisão de delta suavizada)
-     *   - BMS_MasterComm_Task_100ms (telemetria VCU, ecrã de cabina)
-     *   - BMS_PrintStatus (debug)
+     *   - BMS_MasterComm_PrintDebug (saída de debug USART2)
+     *   - (display/diagnóstico)
      * NÃO são usados por BMS_CheckProtections (que já executou com raw acima). */
     BMS_ApplyVoltageFilter(hbms);
 
@@ -1023,7 +1023,6 @@ const char *BMS_GetFaultString(uint32_t fault_flags)
     if (fault_flags & BMS_FAULT_COMM)     { return "COMM_ERROR"; }
     if (fault_flags & BMS_FAULT_HB_FAIL)  { return "HEARTBEAT_FAIL"; }
     if (fault_flags & BMS_FAULT_CRC)      { return "CRC_ERROR"; }
-    if (fault_flags & BMS_FAULT_CONTACTOR){ return "CONTACTOR_FAULT"; }
     return "UNKNOWN_FAULT";
 }
 

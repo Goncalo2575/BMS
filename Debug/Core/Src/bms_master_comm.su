@@ -1,6 +1,2 @@
-../Core/Src/bms_master_comm.c:22:9:BMS_MasterComm_CalcChecksum	24	static
-../Core/Src/bms_master_comm.c:35:13:BMS_MasterComm_BuildPacket	24	static
-../Core/Src/bms_master_comm.c:72:6:BMS_MasterComm_Init	16	static
-../Core/Src/bms_master_comm.c:99:6:BMS_MasterComm_Task_100ms	48	static
-../Core/Src/bms_master_comm.c:148:6:BMS_MasterComm_IsLinkOk	16	static
-../Core/Src/bms_master_comm.c:165:6:BMS_MasterComm_RxCallback	16	static
+../Core/Src/bms_master_comm.c:14:6:BMS_MasterComm_Init	16	static
+../Core/Src/bms_master_comm.c:23:6:BMS_MasterComm_PrintDebug	288	static

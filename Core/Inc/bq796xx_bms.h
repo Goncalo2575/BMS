@@ -66,19 +66,6 @@
 #define BMS_SOC_TABLE_SIZE          12U
 
 /* =========================================================================
- * DETECÇÃO DE SOLDADURA DO CONTACTOR (Weld Detection)
- * =========================================================================
- * Após ordem de abertura, o contacto auxiliar (NO) do contactor deve
- * confirmar a abertura mecânica. A detecção é NÃO-BLOQUEANTE: BMS_CheckContactorWeld
- * lê o pino uma vez por ciclo de 100 ms; 3 ciclos consecutivos com leitura
- * HIGH (300 ms) → soldadura confirmada. O período do superloop (100 ms)
- * actua como debounce natural (>> ~2 ms de bounce mecânico).
- * PINO: PB15 ligado ao contacto auxiliar (Pull-Down externo).
- * Verificar pinout conforme o esquemático real do contactor. */
-#define CONTACTOR_WELD_PORT         GPIOB
-#define CONTACTOR_WELD_PIN          GPIO_PIN_15
-
-/* =========================================================================
  * COMM CLEAR (Protocolo BQ79600)
  * =========================================================================
  * Se uma leitura exceder tWAIT_READ_MAX, forçar a linha TX→bridge a GND
@@ -432,7 +419,6 @@ typedef enum {
     BMS_FAULT_OPEN_WIRE     = 0x00000020U,  /* Circuito aberto */
     BMS_FAULT_HB_FAIL       = 0x00000040U,  /* Heartbeat fail */
     BMS_FAULT_CRC           = 0x00000080U,  /* Erro CRC */
-    BMS_FAULT_CONTACTOR     = 0x00000100U,  /* Falha contactor */
 } BMS_FaultFlag_t;
 
 /** Resultado das operações */
@@ -512,9 +498,6 @@ typedef struct {
     uint16_t            filtered_mv[BMS_NUM_SLAVES][BMS_CELLS_PER_SLAVE];
     bool                filter_primed;          /* TRUE após 1ª leitura (seed do filtro) */
 
-    /* Detecção de soldadura do contactor */
-    bool                contactor_weld_detected;
-
     /* POST (Power-On Self Test) */
     bool                post_passed;            /* TRUE se POST completou sem erros */
 
@@ -567,7 +550,6 @@ void         BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms);
 void         BMS_IWDG_Init(void);
 void         BMS_IWDG_Refresh(void);
 BMS_Status_t BMS_PowerOnSelfTest(BMS_Handle_t *hbms);
-bool         BMS_CheckContactorWeld(void);
 void         BMS_CommClear(BMS_Handle_t *hbms);
 
 /* --- Processamento de Sinal e SoC --- */
