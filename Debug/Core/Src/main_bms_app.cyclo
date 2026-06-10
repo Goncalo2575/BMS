@@ -1,0 +1,6 @@
+../Core/Src/main_bms_app.c:71:13:BMS_PrintStatus	8
+../Core/Src/main_bms_app.c:124:13:BMS_ContactorControl	6
+../Core/Src/main_bms_app.c:181:21:BMS_ClearHardwareFaultLatches	3
+../Core/Src/main_bms_app.c:229:13:BMS_FaultRecoveryAttempt	15
+../Core/Src/main_bms_app.c:335:6:BMS_Main	20
+../Core/Src/main_bms_app.c:585:6:BMS_TIM_PeriodElapsedCallback	2
