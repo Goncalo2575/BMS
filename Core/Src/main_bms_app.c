@@ -1,85 +1,72 @@
 /**
  * @file    main_bms_app.c
- * @brief   BMS - Aplicação Principal e Ponto de Entrada
- *          Exemplo de integração completa no STM32F446
+ * @brief   BMS - Aplicação Principal e Ponto de Entrada (Arquitectura Centralizada)
  *
- *  PINOUT REFERÊNCIA (hardware actual STM32F446RET6):
+ *  ARQUITECTURA CENTRALIZADA:
+ *  Este STM32F446RET6 (placa Master) é o único MCU que governa o pack.
+ *  Centraliza a máquina de estados do BMS, a interface com o IMD (Insulation
+ *  Monitoring Device) e a telemetria (CAN/UART). DECIDE e REPORTA; a actuação
+ *  física do contactor é delegada no estágio de potência.
+ *
+ *  PINOUT ACTUAL (apenas PA0-PA3 + PA8):
  *  ┌──────────────────────────────────────────────────────────────┐
- *  │  STM32F446RET6 — UART4 Full-Duplex Asynchronous + DMA        │
- *  │                                                              │
- *  │  PA0  (UART4_TX, pino 14, AF8) ──────► BQ79600 UART_RX      │
- *  │  PA1  (UART4_RX, pino 15, AF8) ◄────── BQ79600 UART_TX      │
- *  │  PC13 (EXTI13 FALLING, Pull-Up) ◄── BQ79600 NFAULT          │
- *  │  PB12 (GPIO_OUT PP)  ──────► Contactor Gate Driver          │
- *  │  PB13 (GPIO_OUT PP)  ──────► BMS_OK (interlock VCU)         │
- *  │  PB14 (GPIO_OUT PP)  ──────► PRECHARGE_OK (interlock VCU)   │
- *  │  PA2  (USART2_TX) ──► Debug TX-only (terminal/registador)   │
- *  │  PA3  (USART2_RX) ── livre (reservado p/ comandos futuros)  │
- *  │  TIM2 (free-running µs + 100 ms tick)                       │
- *  │  DMA1 (UART4_TX)   DMA1 (UART4_RX)                          │
+ *  │  PA0 (UART4_TX, AF8) ──────► BQ79600 UART_RX                 │
+ *  │  PA1 (UART4_RX, AF8) ◄────── BQ79600 UART_TX                 │
+ *  │  PA2 (USART2_TX) ──► Debug/Telemetria TX-only ao master      │
+ *  │  PA3 (USART2_RX) ── livre (reservado p/ comandos futuros)    │
+ *  │  PA8 (EXTI8 FALLING, Pull-Up) ◄── BQ79600 NFAULT (entrada)   │
+ *  │  TIM2 (free-running µs)   TIM6 (HAL timebase 1 ms)           │
+ *  │  DMA1 (UART4_TX)   DMA1 (UART4_RX)                           │
  *  └──────────────────────────────────────────────────────────────┘
+ *  Sem pinos de contactor/interlock neste MCU — as decisões viajam para o
+ *  estágio de potência via telemetria + reporte por evento (ver abaixo).
  *
- *  CONFIGURAÇÃO CubeMX OBRIGATÓRIA:
- *    UART4  -> Asynchronous (NÃO Half-Duplex)
- *    UART4  -> Baud Rate: 1000000, Word Length: 8, Parity: None, Stop: 1
- *    DMA    -> UART4_RX e UART4_TX em modo Normal
- *    USART2 -> Asynchronous, 115200 8N1 (debug TX-only, PA2/PA3)
- *    TIM2   -> Internal Clock, free-running 1 µs/tick + interrupção 100 ms
- *    EXTI13 -> GPIO_EXTI13, Falling edge, Pull-up, Priority 0 (máxima)
- *    HAL Timebase Source -> TIM6 (não TIM2 — evitar conflito)
- *    IWDG   -> activar (ou deixar BMS_IWDG_Init configurar)
+ *  CONFIGURAÇÃO CubeMX OBRIGATÓRIA (clock 84 MHz):
+ *    RCC    -> HSI -> PLL: PLLM=16, PLLN=336, PLLP=4 -> SYSCLK 84 MHz
+ *    Bus    -> AHB÷1 (84 MHz), APB1÷2 (42 MHz), APB2÷1 (84 MHz)
+ *    UART4  -> Asynchronous, 1000000 8N1, DMA RX+TX Normal
+ *    USART2 -> Asynchronous, 115200 8N1 (debug/telemetria TX-only)
+ *    TIM2   -> Internal Clock, Prescaler=83 (1 µs/tick), Period=0xFFFFFFFF, sem IT
+ *    EXTI8  -> PA8 GPIO_EXTI8, Falling edge, Pull-up; NVIC EXTI9_5 prioridade 0
+ *    HAL Timebase Source -> TIM6 (alimenta HAL_GetTick — cadência de 100 ms)
+ *    IWDG   -> DESACTIVAR no CubeMX (BMS_IWDG_Init arranca-o após o boot)
  *
- *  NOTA PCB OBRIGATÓRIA PARA 15S:
- *  Nos dois slaves BQ79616-Q1:
- *    - VC16 ligado a VC15 (curto-circuito físico na PCB)
- *    - CB16 ligado a CB15 (curto-circuito físico na PCB)
- *  Sem este requisito surgem falsas detecções Open Wire permanentes!
+ *  ⚠ NOTA DE SEGURANÇA (resumo — detalhe em bq796xx_bms_monitor.c, Secção 9):
+ *  A decisão de abrir o contactor é tomada aqui mas actuada no estágio de
+ *  potência. Para cumprir o FTTI, a decisão é emitida POR EVENTO (reporte
+ *  imediato quando contactor_closed/bms_ok mudam), não apenas na telemetria
+ *  de 1 Hz. Recomenda-se interlock BMS_OK de HARDWARE dedicado (ASIL-D).
  *
- * @version 2.2.0
+ * @version 3.2.0
  */
 
 #include "bq796xx_bms.h"
 #include "bms_master_comm.h"
 #include <stdio.h>
+#include <stdbool.h>
 
 /* =========================================================================
  * VARIÁVEIS GLOBAIS DA APLICAÇÃO
  * ========================================================================= */
 
-/* Handle principal do BMS */
-static BMS_Handle_t g_bms;
+static BMS_Handle_t      g_bms;
+BMS_MasterComm_t         g_master_comm;
 
-/* Handle do módulo de comunicação BMS → Master/VCU */
-BMS_MasterComm_t g_master_comm;
-
-/* Handles HAL */
 extern UART_HandleTypeDef  huart4;   /* UART4 — BQ79600 bridge (PA0/PA1) */
-extern UART_HandleTypeDef  huart2;   /* USART2 (PA2/PA3) — Telemetria externa passiva */
-extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs */
+extern UART_HandleTypeDef  huart2;   /* USART2 (PA2/PA3) — debug/telemetria TX-only */
+extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
 
-/* Flag de ciclo de 100 ms (set por timer interrupt ou SysTick) */
-static volatile bool g_tick_100ms = false;
+#define BMS_TASK_PERIOD_MS   100U
 
 /* =========================================================================
  * FUNÇÕES DE APOIO À APLICAÇÃO
  * ========================================================================= */
 
 /**
- * @brief  Lógica de controlo do contactor baseada no estado do BMS
- *
- *  DEFESA EM PROFUNDIDADE (defense-in-depth):
- *  A barreira primária contra religamento indevido encontra-se em
- *  BMS_ContactorClose(). Esta função acrescenta uma camada exterior:
- *  não tenta sequer chamar Close() enquanto existir um evento NFAULT
- *  por processar, evitando chamadas de função desnecessárias e tornando
- *  a intenção de segurança explícita ao nível do controlador.
+ * @brief  Lógica de controlo do contactor (decisão lógica reportada ao master)
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
-    /* Camada exterior: não actuar sobre o contactor enquanto existir
-     * um evento de hardware não processado. Qualquer estado de tensão
-     * ou temperatura lido antes do BMS_ProcessFaults() escoar o evento
-     * pode estar desactualizado face à condição real do pack. */
     if (__atomic_load_n(&hbms->nfault_pending, __ATOMIC_SEQ_CST) != 0U)
     {
         return;
@@ -90,7 +77,7 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
     {
         if (!hbms->contactor_closed)
         {
-            BMS_ContactorClose(hbms);   /* Barreira interna reforça aqui */
+            BMS_ContactorClose(hbms);   /* Barreiras internas reforçam aqui */
         }
     }
     else
@@ -104,51 +91,19 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
 
 /**
  * @brief  Limpeza física dos registos de latch de fault em todos os dispositivos
- *
- *  CONTEXTO CRÍTICO (hardware latching):
- *  Os registos FAULT_* do BQ79616 são de retenção de estado (latch).
- *  Quando um comparador deteta OV/UV/OW, conduz NFAULT a LOW e mantém-no
- *  nesse estado indefinidamente até receber um comando de limpeza explícito.
- *
- *  CONSEQUÊNCIA SEM ESTA LIMPEZA:
- *  Se o software limpar apenas as suas variáveis internas (fault_flags) sem
- *  enviar o comando UART, o pino NFAULT permanece fisicamente preso em LOW.
- *  Como a EXTI13 está configurada para flanco descendente (Falling edge),
- *  um novo evento catastrófico não consegue gerar novo flanco — a ISR de
- *  segurança sub-24 µs fica cega para todas as falhas subsequentes e o
- *  sistema recai numa dependência insegura da varredura de 100 ms.
- *
- *  SEQUÊNCIA DE LIMPEZA:
- *  1. Broadcast write 0xFF -> FAULT_SUMMARY  (limpa registo sumário)
- *  2. Broadcast write 0xFF -> FAULT_OV       (liberta comparador OV)
- *  3. Broadcast write 0xFF -> FAULT_UV       (liberta comparador UV)
- *  4. Broadcast write 0xFF -> FAULT_VCOW     (liberta detecção Open Wire)
- *  5. Broadcast write 0xFF -> FAULT_COMM     (liberta flags de comm)
- *  6. Single write 0xFF   -> Bridge FAULT_COMM* (liberta bridge)
- *  Após estes writes, o BQ79616 reavalia os comparadores. Se as condições
- *  físicas se resolveram, NFAULT volta a HIGH — pronto para novo flanco.
- *
- * @param  hbms     Handle do BMS
- * @return BMS_OK se limpeza enviada com sucesso
  */
 static BMS_Status_t BMS_ClearHardwareFaultLatches(BMS_Handle_t *hbms)
 {
     uint8_t      clear_val = FAULT_CLEAR_VAL;  /* 0xFF */
     BMS_Status_t status;
 
-    /* Limpar latches dos slaves via Broadcast
-     * (propaga-se através da barreira galvânica para BQ79616) */
     status = BMS_WriteBroadcast(hbms, REG_FAULT_RST1, &clear_val, 1U);
     if (status != BMS_OK) { return status; }
 
     status = BMS_WriteBroadcast(hbms, REG_FAULT_RST2, &clear_val, 1U);
     if (status != BMS_OK) { return status; }
 
-    /* BUG-4 CORRIGIDO: Limpeza mandatória dos latches da Bridge BQ79600-Q1.
-     * Comandos Broadcast NÃO chegam à bridge — param nos slaves.
-     * Se a falha for nativa da interface UART da bridge (FAULT_COMM1/2),
-     * os latches ficam retidos e NFAULT permanece LOW indefinidamente.
-     * A bridge requer escritas Single Device dedicadas (endereço 0x00). */
+    /* Latches da Bridge (Broadcast não chega à bridge — precisa Single) */
     (void)BMS_WriteSingleDevice(hbms, BMS_ADDR_BRIDGE,
                                 REG_FAULT_RST1, &clear_val, 1U);
     (void)BMS_WriteSingleDevice(hbms, BMS_ADDR_BRIDGE,
@@ -159,25 +114,6 @@ static BMS_Status_t BMS_ClearHardwareFaultLatches(BMS_Handle_t *hbms)
 
 /**
  * @brief  Tentativa de recuperação e reset de faults após shutdown
- *
- *  CORRECÇÕES APLICADAS:
- *
- *  [A] Limpeza física dos latches de hardware ANTES de transitar para MONITORING.
- *      Sem BMS_ClearHardwareFaultLatches(), o pino NFAULT permanece LOW após
- *      a recuperação, impedindo novos flancos descendentes e cegando a ISR.
- *
- *  [B] Open Wire adicionado às condições NÃO recuperáveis.
- *      Cabo partido é uma falha física irreparável por software. Sem esta
- *      condição, o sistema transitava para MONITORING com BMS_FAULT_OPEN_WIRE
- *      activa, ficando preso num estado paradoxal: state=MONITORING mas
- *      BMS_ContactorControl recusando fechar por fault_flags != 0.
- *
- *  [C] Limpeza das fault_flags individuais de cada slave em paralelo com
- *      a flag global. Sem este passo, hbms->slave[s].fault_flags acumula
- *      flags perpétuas inconsistentes com o estado holístico do sistema.
- *
- * @param  hbms             Handle do BMS
- * @param  retry_counter    Ponteiro para contador de tentativas
  */
 static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
                                       uint32_t *retry_counter)
@@ -186,40 +122,33 @@ static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
 
     if (*retry_counter > 3U)
     {
-        /* BUG-2 CORRIGIDO: adormece fisicamente o barramento em vez de
-         * apenas alterar a variável (que o polling revertia para FAULT).
-         * BMS_EnterSleep: para balanceamento, abre contactor, envia pulso
-         * UART 9 ms → state=SLEEP. O guard de SLEEP em BMS_Task_100ms
-         * quebra o ciclo infinito FAULT→SHUTDOWN→FAULT. */
+        /* Adormece fisicamente o barramento; o guard de SLEEP em
+         * BMS_Task_100ms quebra o ciclo infinito FAULT→SHUTDOWN→FAULT. */
         BMS_EnterSleep(hbms);
         return;
     }
 
-    /* Leitura actualizada das condições físicas */
     BMS_ReadAllCellVoltages(hbms);
     BMS_ReadAllTemperatures(hbms);
 
     bool recoverable = true;
 
-    /* Tensão OV ainda acima da janela de histérése */
     if ((hbms->fault_flags & BMS_FAULT_OV) &&
         (hbms->max_cell_mv > (CELL_OV_MV - 50U)))
     {
         recoverable = false;
     }
-    /* Tensão UV ainda abaixo da janela de histérése */
     if ((hbms->fault_flags & BMS_FAULT_UV) &&
         (hbms->min_cell_mv < (CELL_UV_MV + 50U)))
     {
         recoverable = false;
     }
-    /* Temperatura ainda acima do limiar seguro */
     if ((hbms->fault_flags & BMS_FAULT_OT) &&
         (hbms->max_temp_c > (int16_t)(CELL_TEMP_MAX_C - 5)))
     {
         recoverable = false;
     }
-    /* [B] Open Wire: falha física — não recuperável por software */
+    /* Open Wire: falha física — não recuperável por software */
     if (hbms->fault_flags & BMS_FAULT_OPEN_WIRE)
     {
         recoverable = false;
@@ -233,16 +162,13 @@ static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
 
     if (recoverable)
     {
-        /* [A] Limpar latches de hardware ANTES de transitar para MONITORING.
-         * Se esta escrita falhar, não prosseguimos — NFAULT ficaria preso. */
+        /* Limpar latches de hardware ANTES de transitar para MONITORING. */
         if (BMS_ClearHardwareFaultLatches(hbms) != BMS_OK)
         {
-            /* Falha de comunicação durante limpeza — não é seguro continuar */
             hbms->fault_flags |= BMS_FAULT_COMM;
             return;
         }
 
-        /* [C] Limpar flags individuais de cada slave */
         for (uint8_t s = 0U; s < BMS_NUM_SLAVES; s++)
         {
             hbms->slave[s].fault_flags = 0U;
@@ -253,7 +179,6 @@ static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
             }
         }
 
-        /* Limpar flags globais recuperáveis */
         hbms->fault_flags &= ~(BMS_FAULT_OV  |
                                 BMS_FAULT_UV  |
                                 BMS_FAULT_OT  |
@@ -269,38 +194,15 @@ static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
  * PONTO DE ENTRADA DA APLICAÇÃO BMS
  * ========================================================================= */
 
-/**
- * @brief  Função principal do BMS
- *         No contexto STM32/CubeMX, este código vai para dentro do main()
- *         após a inicialização do HAL e dos periféricos gerada pelo CubeMX.
- *
- *  Estrutura típica no main.c do CubeMX:
- *
- *  int main(void) {
- *      HAL_Init();
- *      SystemClock_Config();
- *      MX_GPIO_Init();
- *      MX_UART4_Init();
- *      MX_TIM2_Init();
- *      BMS_Main();   // <-- Chamar aqui
- *  }
- */
 void BMS_Main(void)
 {
     BMS_Status_t status;
-    /* BUG-04 CORRIGIDO: dois contadores separados com responsabilidades distintas.
-     * fault_cycle_count: número de ciclos de 100ms desde a entrada em FAULT
-     *   → controla o TEMPO entre tentativas de recovery (5 s = 50 ciclos)
-     * fault_retry_count: número de tentativas de recovery efectivamente feitas
-     *   → controla o LIMITE de tentativas (máx 3); passado ao BMS_FaultRecoveryAttempt
-     *
-     * Problema da versão anterior: um único contador servia ambos.
-     * Após BMS_FaultRecoveryAttempt incrementar o contador para 3 (limite atingido)
-     * e fazer state=SHUTDOWN, o módulo 50 voltava a disparar aos ciclos 50, 100...
-     * e chamava BMS_FaultRecoveryAttempt de novo, sobrepondo o estado SHUTDOWN. */
     uint32_t     fault_cycle_count  = 0U;   /* ciclos em FAULT desde a última transição */
     uint32_t     fault_retry_count  = 0U;   /* tentativas de recovery efectuadas */
     uint32_t     debug_print_div    = 0U;
+    uint32_t     last_task_tick;            /* timestamp do último ciclo de 100 ms */
+    bool         last_contactor_decision;   /* p/ reporte por evento (FTTI) */
+    bool         last_bms_ok;
 
     /* ------------------------------------------------------------------
      * FASE 1: Inicialização do BMS
@@ -313,8 +215,6 @@ void BMS_Main(void)
     if (status != BMS_OK)
     {
         printf("[BMS] FATAL: Initialization failed! Code: %d\r\n", (int)status);
-        /* Falha fatal de inicialização: contactor permanece aberto (estado de
-         * reset). Sem LED de estado — o halt é silencioso. */
         while (1U)
         {
             BMS_DelayMs(200U);
@@ -326,23 +226,19 @@ void BMS_Main(void)
     printf("[BMS] Ring intact: %s\r\n", g_bms.ring_intact ? "YES" : "NO");
 
     /* ------------------------------------------------------------------
-     * FASE 1b: Inicializar saída de debug (USART2, PA2/PA3, TX-only)
+     * FASE 1b: Inicializar saída de debug/telemetria (USART2, TX-only)
      * ------------------------------------------------------------------ */
     BMS_MasterComm_Init(&g_master_comm, &huart2);
-    printf("[BMS] Debug output init OK (USART2 PA2/PA3, TX-only)\r\n");
+    printf("[BMS] Telemetry/debug init OK (USART2 PA2/PA3, TX-only)\r\n");
 
     /* ------------------------------------------------------------------
-     * FASE 1c: IWDG Watchdog (ASIL-D)
-     * A partir deste ponto, BMS_IWDG_Refresh() DEVE ser chamado em cada
-     * iteração do super-loop. Se omitido → reset MCU em ~500 ms.
+     * FASE 1c: IWDG Watchdog (ASIL-D) — arranca após o boot
      * ------------------------------------------------------------------ */
     BMS_IWDG_Init();
     printf("[BMS] IWDG init OK (timeout ~500 ms)\r\n");
 
     /* ------------------------------------------------------------------
      * FASE 1d: Power-On Self Test (POST)
-     * Verifica CRC, comunicação, ADC e NFAULT antes de permitir operação.
-     * Se POST falhar, o sistema NÃO fecha o contactor.
      * ------------------------------------------------------------------ */
     status = BMS_PowerOnSelfTest(&g_bms);
     if (status != BMS_OK)
@@ -357,66 +253,82 @@ void BMS_Main(void)
     }
 
     /* ------------------------------------------------------------------
-     * FASE 2: Fechar contactor se POST e condições iniciais OK
+     * FASE 2: Decisão de fechar contactor se POST e condições iniciais OK
      * ------------------------------------------------------------------ */
     BMS_DelayMs(100U);
     BMS_ReadAllCellVoltages(&g_bms);
     BMS_ReadAllTemperatures(&g_bms);
+    BMS_UpdateHardwareInterlocks(&g_bms);   /* calcula bms_ok inicial */
 
     if ((g_bms.fault_flags == BMS_FAULT_NONE) && (g_bms.post_passed))
     {
-        printf("[BMS] Conditions OK. Closing contactor...\r\n");
+        printf("[BMS] Conditions OK. Decision: CLOSE contactor (master actuates).\r\n");
         BMS_ContactorClose(&g_bms);
     }
     else
     {
-        printf("[BMS] Cannot close contactor: %s\r\n",
+        printf("[BMS] Decision: keep contactor OPEN: %s\r\n",
                BMS_GetFaultString(g_bms.fault_flags));
     }
+
+    /* Reportar estado inicial ao master e semear os detectores de evento */
+    BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
+    last_contactor_decision = g_bms.contactor_closed;
+    last_bms_ok             = g_bms.bms_ok;
 
     /* ------------------------------------------------------------------
      * FASE 3: Super-loop de operação
      * ------------------------------------------------------------------ */
     printf("[BMS] Entering monitoring loop.\r\n");
 
+    last_task_tick = HAL_GetTick();
+
     while (1U)
     {
-        /* ----------------------------------------------------------
-         * VERIFICAÇÃO NFAULT — FORA DO TICK DE 100 ms
-         * Um evento de hardware deve ser processado imediatamente,
-         * não condicionado ao período de amostragem.
-         * Latência máxima de detecção aqui: 1 ms (delay do idle poll).
-         * ----------------------------------------------------------  */
+        /* IWDG: refrescar em TODAS as iterações (independente do tick). */
+        BMS_IWDG_Refresh();
+
+        /* NFAULT fora do tick — processamento imediato. */
         if (__atomic_load_n(&g_bms.nfault_pending, __ATOMIC_SEQ_CST) != 0U)
         {
             BMS_ProcessFaults(&g_bms);
-            /* Contactor já foi aberto na ISR. Garante sincronia do estado. */
+
+            /* REPORTE POR EVENTO (FTTI): a decisão de abrir tem de chegar ao
+             * estágio de potência de imediato, não no próximo ciclo de 1 Hz. */
+            BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
+            last_contactor_decision = g_bms.contactor_closed;
+            last_bms_ok             = g_bms.bms_ok;
+            debug_print_div         = 0U;
         }
 
-        /* Aguarda tick de 100 ms (set pelo TIM2 Period Elapsed callback) */
-        if (!g_tick_100ms)
+        /* Cadência de 100 ms via HAL_GetTick (base TIM6). Subtracção unsigned
+         * segura no wraparound de uwTick. */
+        if ((HAL_GetTick() - last_task_tick) < BMS_TASK_PERIOD_MS)
         {
             BMS_DelayMs(1U);
             continue;
         }
-        g_tick_100ms = false;
+        last_task_tick += BMS_TASK_PERIOD_MS;   /* cadência sem deriva acumulada */
 
-        /* ----------------------------------------------------------
-         * TAREFA PRINCIPAL DO BMS @ 100 ms
-         * ---------------------------------------------------------- */
+        /* TAREFA PRINCIPAL DO BMS @ 100 ms */
         status = BMS_Task_100ms(&g_bms);
 
-        /* ----------------------------------------------------------
-         * GESTÃO DO CONTACTOR
-         * A barreira nfault_pending em BMS_ContactorControl e em
-         * BMS_ContactorClose garante que não há fecho indevido mesmo
-         * que um evento ocorra entre BMS_Task_100ms e este ponto.
-         * ---------------------------------------------------------- */
+        /* GESTÃO DA DECISÃO DE CONTACTOR */
         BMS_ContactorControl(&g_bms);
 
-        /* ----------------------------------------------------------
-         * GESTÃO DE RECOVERY EM ESTADO FAULT
-         * ---------------------------------------------------------- */
+        /* REPORTE POR EVENTO: se a DECISÃO de contactor ou o BMS_OK mudaram,
+         * emitir imediatamente ao master (mitigação de latência — ver nota
+         * de segurança). Não espera pelo heartbeat de 1 Hz. */
+        if ((g_bms.contactor_closed != last_contactor_decision) ||
+            (g_bms.bms_ok           != last_bms_ok))
+        {
+            BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
+            last_contactor_decision = g_bms.contactor_closed;
+            last_bms_ok             = g_bms.bms_ok;
+            debug_print_div         = 0U;
+        }
+
+        /* GESTÃO DE RECOVERY EM ESTADO FAULT */
         if (g_bms.state == BMS_STATE_FAULT)
         {
             fault_cycle_count++;
@@ -429,66 +341,16 @@ void BMS_Main(void)
         }
         else
         {
-            /* Fora de FAULT: reiniciar ambos os contadores */
             fault_cycle_count = 0U;
             fault_retry_count = 0U;
         }
 
-        /* ----------------------------------------------------------
-         * SAÍDA DE DEBUG @ 1 Hz (a cada 10 ciclos de 100 ms)
-         * Linha de texto legível por USART2 (PA2, TX-only). Não há
-         * VCU nem heartbeat — a ausência de leitor nunca causa falha.
-         * ---------------------------------------------------------- */
+        /* HEARTBEAT DE TELEMETRIA @ 1 Hz (a cada 10 ciclos de 100 ms) */
         debug_print_div++;
         if (debug_print_div >= 10U)
         {
             debug_print_div = 0U;
             BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
         }
-
-        /* ----------------------------------------------------------
-         * IWDG REFRESH — OBRIGATÓRIO EM CADA ITERAÇÃO
-         * Se esta linha for removida ou se o CPU pendurar antes de a
-         * atingir, o MCU reseta automaticamente em ~500 ms.
-         * ---------------------------------------------------------- */
-        BMS_IWDG_Refresh();
-    }
-}
-
-/* =========================================================================
- * CALLBACK DO TIMER HARDWARE (100 ms tick)
- * ========================================================================= */
-
-/**
- * @brief  Callback invocado pelo HAL quando o TIM2 transborda (Period Elapsed)
- *
- *  CONFIGURAÇÃO CubeMX OBRIGATÓRIA para TIM2 @ 100 ms exactos:
- *    Clock source : Internal Clock
- *    Prescaler    : (SystemCoreClock / 10000) - 1   -> tick = 100 µs
- *    Counter Period (ARR) : 999                      -> 999 * 100 µs = 99,9 ms
- *                                                       ≈ 100 ms
- *
- *  Exemplo para STM32F446 a 180 MHz:
- *    Prescaler = 17999  (180 000 000 / 10 000 - 1)
- *    ARR       = 999
- *    Verificação: 180e6 / (17999+1) / (999+1) = 10 Hz -> T = 100 ms ✓
- *
- *  PORQUÊ NÃO usar HAL_GetTick() aqui:
- *    Esta função é chamada precisamente quando o hardware de TIM2 transborda.
- *    Adicionar uma subtracção de SysTick introduz jitter (a ISR pode chegar
- *    alguns SysTick depois do overflow real) e ignora o periférico dedicado.
- *    O corpo desta função deve ser mínimo e determinístico.
- *
- *  NOTA: HAL usa TIM1 ou TIM8 para HAL_GetTick() por defeito. Configurar
- *        o TIM base do HAL para um timer diferente do TIM2 no CubeMX
- *        (Project -> Advanced Settings -> HAL Timebase Source).
- */
-void BMS_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    /* Guarda para garantir que só TIM2 dispara o tick do BMS.
-     * Outros timers (ex: TIM1 usado pelo HAL internamente) não interferem. */
-    if (htim->Instance == TIM2)
-    {
-        g_tick_100ms = true;
     }
 }

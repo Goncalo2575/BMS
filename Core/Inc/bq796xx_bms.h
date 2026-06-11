@@ -3,6 +3,15 @@
  * @brief   BMS Driver - STM32F446 + BQ79600-Q1 Bridge + 2x BQ79616-Q1 Slaves
  *          Topologia: Anel Daisy-Chain Isolado (Ring)
  *          Configuração: 2 Slaves x 15 células = 30 células totais
+ *
+ *  ARQUITECTURA DE ACTUAÇÃO (v3.2):
+ *  Este MCU NÃO comanda fisicamente o contactor nem os interlocks.
+ *  É um MONITOR que DECIDE e REPORTA. O contactor, BMS_OK e PRECHARGE_OK
+ *  são geridos por um módulo MASTER externo (colega), que lê a decisão
+ *  deste BMS pela saída de debug (USART2, PA2). Os únicos pinos usados:
+ *    PA0/PA1 = UART4 (bridge BQ79600)   PA2/PA3 = USART2 (debug TX-only)
+ *    PA8     = NFAULT (entrada, EXTI8 falling, pull-up)
+ *  Não há saídas GPIO de contactor/interlock neste MCU.
  */
 
 #ifndef BQ796XX_BMS_H
@@ -17,9 +26,9 @@
  * RASTREABILIDADE DE BUILD
  * ========================================================================= */
 #define BMS_FW_VERSION_MAJOR        3U
-#define BMS_FW_VERSION_MINOR        1U
+#define BMS_FW_VERSION_MINOR        2U
 #define BMS_FW_VERSION_PATCH        0U
-#define BMS_FW_VERSION_STRING       "3.1.0"
+#define BMS_FW_VERSION_STRING       "3.2.0"
 
 /* =========================================================================
  * CONFIGURAÇÃO GERAL DO SISTEMA
@@ -36,13 +45,12 @@
  * WATCHDOG INDEPENDENTE (IWDG) — ASIL-D OBRIGATÓRIO
  * =========================================================================
  * Se o super-loop bloquear (hang do CPU, deadlock, corrupção de stack),
- * o contactor permanece no último estado — potencialmente fechado sobre um
- * pack em fault. O IWDG do STM32 é alimentado pelo oscilador LSI (~32 kHz),
- * independente do clock principal, e reseta o MCU se não for refrescado.
+ * o IWDG do STM32 (oscilador LSI ~32 kHz, independente do clock principal)
+ * reseta o MCU se não for refrescado.
  *
  * Configuração: PSC=IWDG_PRESCALER_64, RLR = (500ms × 32000Hz) / 64 = 250
- * Timeout real: ~500 ms (5 ciclos de 100ms de margem).
- * BMS_IWDG_Refresh() deve ser chamado em CADA iteração do super-loop. */
+ * Timeout real: ~500 ms. BMS_IWDG_Refresh() em CADA iteração do super-loop.
+ * Independente do SYSCLK (84 MHz) — corre do LSI. */
 #define BMS_IWDG_PRESCALER          IWDG_PRESCALER_64
 #define BMS_IWDG_RELOAD             250U     /* ~500 ms timeout */
 
@@ -50,27 +58,17 @@
  * FILTRO DE MÉDIA MÓVEL PARA TENSÕES CELULARES
  * =========================================================================
  * IIR exponencial: filtered = (raw + (ALPHA-1) × filtered) / ALPHA
- * ALPHA=4 → 25% peso para leitura nova, 75% história.
- * Reduz ruído ADC e elimina picos espúrios de 1 ciclo que causavam
- * transições OV/UV falsas no comparador de software. */
+ * ALPHA=4 → 25% peso para leitura nova, 75% história. */
 #define BMS_VOLTAGE_FILTER_ALPHA    4U
 
 /* =========================================================================
  * ESTIMAÇÃO DE ESTADO DE CARGA (SoC) — OCV Lookup
- * =========================================================================
- * Tabela OCV (Open Circuit Voltage) para células LiFePO4 (~3.0V a ~3.6V).
- * Interpola linearmente entre pontos para obter SoC 0-100%.
- * LIMITAÇÃO: OCV é válida apenas em repouso (sem carga/corrente).
- * Para estimação dinâmica (com corrente), implementar Coulomb Counting.
- * NOTA: substituir pela tabela do fabricante das células reais. */
+ * ========================================================================= */
 #define BMS_SOC_TABLE_SIZE          12U
 
 /* =========================================================================
  * COMM CLEAR (Protocolo BQ79600)
- * =========================================================================
- * Se uma leitura exceder tWAIT_READ_MAX, forçar a linha TX→bridge a GND
- * por 15-20 períodos de bit (15-20 µs a 1 Mbps) para rearmar a state
- * machine do receptor UART nos slaves. */
+ * ========================================================================= */
 #define BMS_COMM_CLEAR_BITS         18U   /* 18 períodos de bit = 18 µs */
 
 /* Endereços dos dispositivos */
@@ -80,31 +78,6 @@
 
 /* =========================================================================
  * BYTES DE INICIALIZAÇÃO (INIT BYTE) — BQ79600-Q1 Protocol Layer
- *
- * ESTRUTURA DO INIT BYTE (8 bits):
- *   bit[7]   : CMD = 1 para qualquer frame enviado pelo host (comando OU pedido de leitura)
- *              CMD = 0 para respostas enviadas pelo dispositivo
- *              ERRO ANTERIOR: INIT_*_READ usavam bit7=0 → IC interpretava como
- *              "resposta órfã" e descartava o frame silenciosamente.
- *   bits[6:5]: Scope (10=Single, 01=Stack, 00=Broadcast, 11=Broadcast Reverse)
- *   bit[4]   : W/R (1=Write, 0=Read)
- *   bit[3]   : Reservado (0)
- *   bits[2:0]: Data Size (000=1 byte, 001=2 bytes, ..., 111=8 bytes)
- *              ERRO ANTERIOR: valor estático 0x90 (SIZE=000) em todas as escritas,
- *              independentemente de data_len. Para data_len=2 com INIT=0x90 (SIZE=1
- *              byte), o IC lia o 2º byte como CRC em vez de dado → FMT_ERR garantido.
- *
- * BASES PARA CONSTRUÇÃO DINÂMICA (size bits sempre em 000; adicionar (N-1)&0x07):
- *   Single Write:  1_10_1_0_000 = 0x98  (bit7=1, scope=10=Single, W/R=1)
- *   Single Read:   1_10_0_0_000 = 0x90  (bit7=1, scope=10=Single, W/R=0)
- *   Broadcast Wrt: 1_00_1_0_000 = 0x88  (bit7=1, scope=00=Broadcast, W/R=1)
- *   Broadcast Rd:  1_00_0_0_000 = 0x80  (bit7=1, scope=00=Broadcast, W/R=0)
- *   Stack Write:   1_01_1_0_000 = 0xA8  (bit7=1, scope=01=Stack, W/R=1)
- *   BcastRev Wrt:  1_11_1_0_000 = 0xF8  (bit7=1, scope=11=BcastRev, W/R=1)
- *
- * MACRO DE CONSTRUÇÃO DINÂMICA:
- *   BMS_INIT(base, N) — N = número de bytes de dados (1 a 8)
- *   Encode (N-1) em bits[2:0]; base já tem bit7=1 e scope+W/R correcto.
  * ========================================================================= */
 #define INIT_BASE_SINGLE_WRITE      0x98U   /* bit7=1, scope=Single, W=1 */
 #define INIT_BASE_SINGLE_READ       0x90U   /* bit7=1, scope=Single, W=0 */
@@ -112,10 +85,6 @@
 #define INIT_BASE_BROADCAST_READ    0x80U   /* bit7=1, scope=Broadcast, W=0 */
 #define INIT_BASE_STACK_WRITE       0xA8U   /* bit7=1, scope=Stack, W=1 */
 #define INIT_BASE_BCAST_REV_WRITE   0xF8U   /* bit7=1, scope=BcastRev, W=1, size=000=1byte */
-/* INIT_BASE_BCAST_REV_ADDR foi REMOVIDO: o valor 0xF9 (bit0=1) codificava 2 bytes
- * de payload no INIT, mas DIR1_ADDR tem apenas 8 bits → o MCU enviava 1 byte de dados
- * e o IC absorvia o byte baixo do CRC como 2º byte esperado → alinhamento partido.
- * Usar INIT_BASE_BCAST_REV_WRITE (0xF8) em todas as escritas reversas de 1 byte. */
 
 /**
  * Constrói dinamicamente o INIT byte codificando o tamanho do payload.
@@ -128,70 +97,42 @@
 /* =========================================================================
  * REGISTOS DA BRIDGE (BQ79600-Q1)
  * ========================================================================= */
-/* Registos de Controlo */
 #define REG_BRIDGE_DIR0_ADDR        0x0306U  /* Endereçamento caminho principal */
 #define REG_BRIDGE_DIR1_ADDR        0x0307U  /* Endereçamento caminho reverso */
 #define REG_BRIDGE_COMM_CTRL        0x0308U  /* Controlo comunicação */
 #define REG_BRIDGE_CONTROL1         0x0309U  /* Controlo geral (SEND_WAKE, DIR_SEL, ADDR_WR) */
 
-/* Registos de Diagnóstico de Comunicação */
 #define REG_BRIDGE_FAULT_COMM1      0x0520U
 #define REG_BRIDGE_FAULT_COMM2      0x0521U  /* Ring break */
 #define REG_BRIDGE_FAULT_COMM3      0x0522U  /* Heartbeat fail */
 #define REG_BRIDGE_FAULT_SUMMARY    0x2100U
 
-/* Registos de Sincronização DLL */
 #define REG_ECC_DATA1               0x0343U
 #define REG_ECC_DATA8               0x034AU
 
 /* =========================================================================
  * REGISTOS DOS SLAVES (BQ79616-Q1)
  * ========================================================================= */
-/* Configuração de Células */
 #define REG_ACTIVE_CELL             0x0003U  /* Número de células activas */
 
-/* Thresholds de Protecção */
 #define REG_OV_THRESH               0x0009U  /* Limiar sobretensão */
 #define REG_UV_THRESH               0x000AU  /* Limiar subtensão */
 #define REG_OVUV_CTRL               0x032CU  /* Controlo protecção OV/UV */
 
-/* Configuração do ADC */
 #define REG_ADC_CONF1               0x0007U  /* Filtro passa-baixo */
 #define REG_ADC_CTRL1               0x030DU  /* Controlo ADC (MAIN_GO, MAIN_MODE, LPF) */
 
 /* Leitura de Tensão das Células — BQ79616-Q1 ADC Result Registers
- *
- * MAPA CORRECTO (BQ79616-Q1 datasheet, secção Register Map):
- *   VCELL16_HI = 0x0568  (célula do topo, endereço mais baixo)
- *   VCELL16_LO = 0x0569
- *   VCELL15_HI = 0x056A
- *   ...
- *   VCELL1_HI  = 0x0586  (célula da base, endereço mais alto)
- *   VCELL1_LO  = 0x0587
- *
- * ERRO ANTERIOR: #define REG_VC1_HI 0x0042 — pertence ao BQ79606A-Q1, não ao
- * BQ79616-Q1. Ler de 0x0042 devolve dados de registos de configuração não relacionados.
- *
- * FÓRMULA: VCELL_N_HI = REG_VCELL16_HI + (16 - N) * 2
- *
- * CONFIGURAÇÃO 15S: VC16 curto-circuito para VC15 (hardware), ACTIVE_CELL=15.
- *   → Ignorar VCELL16 (0x0568/0x0569) pois é duplicado de VCELL15.
- *   → Ler 15 células a partir de VCELL15_HI (0x056A): 30 bytes contíguos.
- *   → Os registos estão em ordem DESCENDENTE: primeiro VCELL15, depois VCELL14,
- *     ..., último VCELL1. O índice de array [0]=Cell1 requer mapeamento invertido. */
+ *   VCELL16_HI = 0x0568 (topo) ... VCELL1_HI = 0x0586 (base)
+ *   FÓRMULA: VCELL_N_HI = REG_VCELL16_HI + (16 - N) * 2
+ *   CONFIG 15S: VC16 curto a VC15; ler 15 células a partir de VCELL15_HI. */
 #define REG_VCELL16_HI              0x0568U  /* VCELL16 = topo, endereço base */
 #define REG_VCELL_STRIDE            2U        /* 2 bytes por célula (HI + LO) */
-/* Para configuração 15S: iniciar leitura em VCELL15 (saltar VCELL16 duplicado) */
 #define REG_VCELL15_HI  (REG_VCELL16_HI + 1U * REG_VCELL_STRIDE)  /* 0x056A */
 #define REG_VCELL1_HI   (REG_VCELL16_HI + 15U * REG_VCELL_STRIDE) /* 0x0586 */
-/* Bytes a ler para 15 células: 15 * 2 = 30 */
 #define BMS_VCELL_READ_BYTES        (BMS_CELLS_PER_SLAVE * REG_VCELL_STRIDE)
 
-/* Leitura de Temperatura — BQ79616-Q1 Auxiliary ADC Result Registers
- *
- * Bloco contiguo 0x0588-0x0591: uma leitura de 10 bytes cobre GPIO1-4 + TSREF.
- *   bytes[0:1] = GPIO1 (NTC1)  bytes[2:3] = GPIO2 (NTC2)  bytes[4:5] = GPIO3 (NTC3)
- *   bytes[6:7] = GPIO4 (HV bus atenuado)   bytes[8:9] = TSREF (ref 5V ratiometrica) */
+/* Leitura de Temperatura — bloco contiguo 0x0588-0x0591 (GPIO1-4 + TSREF) */
 #define REG_GPIO1_HI                0x0588U
 #define REG_GPIO1_LO                0x0589U
 #define REG_GPIO2_HI                0x058AU
@@ -210,34 +151,41 @@
 #define HV_BUS_ATTENUATION_RATIO    30U       /* Verificar divisor resistivo PCB */
 #define PRECHARGE_THRESHOLD_MV      113400UL  /* 90% * 126V */
 
-/* Pinos de interlock hardware para a VCU */
-#define BMS_OK_PORT                 GPIOB
-#define BMS_OK_PIN                  GPIO_PIN_13
-#define PRECHARGE_OK_PORT           GPIOB
-#define PRECHARGE_OK_PIN            GPIO_PIN_14
+/* =========================================================================
+ * INTERLOCKS — APENAS LÓGICOS (sem GPIO neste MCU)
+ * =========================================================================
+ * As decisões de segurança (contactor abrir/fechar, BMS_OK, PRECHARGE_OK)
+ * NÃO accionam pinos neste MCU. São calculadas e guardadas no handle
+ * (hbms->contactor_closed, hbms->bms_ok, hbms->precharge_ready) e
+ * comunicadas ao módulo MASTER pela saída de debug (USART2). O master é
+ * que actua sobre o hardware (contactor, relés, etc.).
+ *
+ * Os antigos #define BMS_OK_PORT/PIN, PRECHARGE_OK_PORT/PIN (GPIOB 13/14)
+ * e o contactor em GPIOB PIN12 foram REMOVIDOS — este MCU usa só PA0-3+PA8. */
 
 /* =========================================================================
  * PINO DE TX DA BRIDGE (controlo GPIO directo para pulsos WAKE/SHUTDOWN/RESET/COMM CLEAR)
  * =========================================================================
  * Durante os pulsos de gestão de energia e o COMM CLEAR, a linha TX é
  * temporariamente desligada do periférico UART e controlada como GPIO puro.
- * Estas macros DEVEM corresponder ao pino físico de TX configurado no CubeMX.
  *
  * HARDWARE ACTUAL: UART4 em PA0 (TX) / PA1 (RX) — STM32F446RET6, AF8.
- *   PA0 (pino 14) = UART4_TX
- *   PA1 (pino 15) = UART4_RX
- * (A versão original usava USART2 em PA2/PA3; alterado para UART4/PA0-PA1.) */
+ *   PA0 (pino 14) = UART4_TX     PA1 (pino 15) = UART4_RX */
 #define BMS_BRIDGE_TX_PORT          GPIOA
 #define BMS_BRIDGE_TX_PIN           GPIO_PIN_0   /* PA0 = UART4_TX (AF8) */
 #define BMS_BRIDGE_RX_PIN           GPIO_PIN_1   /* PA1 = UART4_RX (AF8) */
 
-/* Parametrização NTC Steinhart-Hart (NTC 10 kΩ, β=3950 K, R1=10 kΩ)
- * Tabela de lookup: 21 pontos de +80°C a -20°C em passos de 5°C
- * Formato: {ratio_x10000, temp_c} onde ratio = V_GPIO / V_TSREF × 10000
- *   (medição ratiométrica: o BQ79616 lê GPIO e TSREF no mesmo ADC, pelo que
- *    a razão cancela o erro de ganho/offset da referência)
- * Tabela definida em bq796xx_bms_monitor.c (g_ntc_table[]).
- * Interpolação linear entre pontos adjacentes. */
+/* =========================================================================
+ * PINO DE NFAULT (entrada da bridge → EXTI)
+ * =========================================================================
+ * HARDWARE ACTUAL: NFAULT da BQ79600 ligado a PA8.
+ *   EXTI linha 8 → vector EXTI9_5_IRQHandler (gerado pelo CubeMX).
+ *   Configurar PA8 como GPIO_EXTI8, Falling edge, Pull-up, NVIC prioridade 0.
+ *   (A versão original usava PC13/EXTI13; alterado para PA8.) */
+#define BMS_NFAULT_PORT             GPIOA
+#define BMS_NFAULT_PIN              GPIO_PIN_8   /* PA8 = NFAULT (EXTI8) */
+
+/* Parametrização NTC Steinhart-Hart (NTC 10 kΩ, β=3950 K, R1=10 kΩ) */
 #define BMS_NTC_TABLE_SIZE          21U
 
 /* Fault Summary dos Slaves */
@@ -247,21 +195,7 @@
 #define REG_SLAVE_FAULT_VCOW        0x0530U  /* Open wire detection */
 #define REG_SLAVE_FAULT_COMM        0x0531U
 
-/* Registos de limpeza de latch (hardware latching clear)
- *
- * ERRO ANTERIOR: código apontava REG_SLAVE_FAULT_RST* para os endereços dos
- * registos de LEITURA de fault (0x052D-0x0531). Estes são Read-Only — o IC
- * ignora escritas para estes endereços. A limpeza nunca ocorria, pelo que
- * o pino NFAULT ficava preso em LOW após a primeira falha.
- *
- * SOLUÇÃO CORRECTA (BQ79616-Q1 datasheet):
- *   A limpeza dos latches é feita escrevendo nos registos de COMANDO:
- *   FAULT_RST1 (0x0331): limpa OV, UV, COMP, VCOW e outros comparadores
- *   FAULT_RST2 (0x0332): limpa FAULT_COMM e falhas de comunicação
- *
- *   Escrever 0xFF nestes registos força a reavaliação de todos os comparadores.
- *   Se as condições físicas se resolveram, NFAULT volta a HIGH e fica pronto
- *   para gerar novo flanco descendente em caso de ocorrência futura. */
+/* Registos de limpeza de latch (hardware latching clear) */
 #define REG_FAULT_RST1              0x0331U  /* Reset OV/UV/COMP/VCOW latches */
 #define REG_FAULT_RST2              0x0332U  /* Reset COMM fault latches */
 #define FAULT_CLEAR_VAL             0xFFU    /* Valor de escrita para limpeza total */
@@ -269,107 +203,61 @@
 /* =========================================================================
  * VALORES E MÁSCARAS DE CONFIGURAÇÃO
  * ========================================================================= */
-/* CONTROL1 bits */
 #define CTRL1_SEND_WAKE             0x20U    /* Bit SEND_WAKE */
 #define CTRL1_ADDR_WR               0x01U    /* Bit ADDR_WR */
 #define CTRL1_DIR_SEL               0x02U    /* Bit DIR_SEL */
 
-/* COMM_CTRL valores */
 #define COMM_CTRL_STACK_DEV         0x02U    /* STACK_DEV = 1 */
-#define COMM_CTRL_TOP_STACK         0x03U    /* TOP_STACK = 1 (= STACK_DEV | TOP_STACK) */
+#define COMM_CTRL_TOP_STACK         0x03U    /* TOP_STACK = 1 */
 
-/* ADC_CTRL1 - ADC contínuo com LPF activado */
 #define ADC_CTRL1_CONTINUOUS_LPF    0x2EU    /* MAIN_GO=1, MAIN_MODE=0b10, LPF_EN=1 */
 
-/* OVUV_CTRL - Activar comparadores OV e UV */
 #define OVUV_CTRL_ENABLE            0x06U
 
-/* ACTIVE_CELL - 15 células */
 #define ACTIVE_CELL_15S             0x0FU
 
 /* Thresholds de tensão dos comparadores autónomos de hardware
- *
- * FÓRMULA OV (BQ79616-Q1 Electrical Characteristics, VOV_COMP_RANGE):
- *   V_OV = 2700 mV + OV_THRESH[5:0] × 25 mV
- *
- * ERRO ANTERIOR: OV_THRESH_VAL = 0x16 (22 dec)
- *   → 2700 + 22 × 25 = 3250 mV  ← ACTIVA FAULT_OV A 3.25V!
- *   Numa célula LiIon com tensão de repouso ~3.7V, os comparadores disparariam
- *   imediatamente em operação normal, bloqueando o sistema permanentemente.
- *
- * VALOR CORRECTO para 3600 mV:
- *   N = (3600 - 2700) / 25 = 900 / 25 = 36 = 0x24
- *
- * FÓRMULA UV (BQ79616-Q1, VUV_COMP_RANGE — base diferente da OV):
- *   V_UV = 2100 mV + UV_THRESH[5:0] × 25 mV
- *   (base 2100 mV vs 2700 mV para OV — verificar tabela do datasheet)
- *   Para 3000 mV: N = (3000 - 2100) / 25 = 36 = 0x24  ← valor original OK */
+ *   V_OV = 2700 mV + OV_THRESH × 25 mV → 0x24 (36) = 3600 mV
+ *   V_UV = 2100 mV + UV_THRESH × 25 mV → 0x24 (36) = 3000 mV */
 #define OV_THRESH_VAL               0x24U   /* 2700 + 36×25 = 3600 mV */
-#define UV_THRESH_VAL               0x24U   /* 2100 + 36×25 = 3000 mV (fórmula UV) */
+#define UV_THRESH_VAL               0x24U   /* 2100 + 36×25 = 3000 mV */
 
 /* =========================================================================
  * BALANCEAMENTO CELULAR PASSIVO (BQ79616-Q1)
- * =========================================================================
- * Os MOSFETs de descarga internos do BQ79616-Q1 são activados bit a bit
- * através dos registos CB_CELL*_CTRL. Cada bit=1 activa a descarga da
- * célula correspondente através da resistência de balanceamento interna.
- *
- * MAPA: CB_CELL1_CTRL (baixo) e CB_CELL9_CTRL (alto) são contíguos.
- * Uma escrita de 2 bytes a partir de REG_CB_CELL1_CTRL configura os 15 canais.
- * Nota: validar endereços exactos contra o Register Map do BQ79616-Q1. */
-#define REG_CB_CELL1_CTRL           0x0030U  /* bits[7:0] = células 1-8 (verificar) */
-#define REG_CB_CELL9_CTRL           0x0031U  /* bits[7:0] = células 9-16 (verificar) */
+ * ========================================================================= */
+#define REG_CB_CELL1_CTRL           0x0030U  /* bits[7:0] = células 1-8 */
+#define REG_CB_CELL9_CTRL           0x0031U  /* bits[7:0] = células 9-16 */
 #define REG_BAL_CTRL1               0x002EU  /* Timer de auto-stop de balanceamento */
 #define REG_BAL_CTRL2               0x002FU  /* Enable auto-stop + período de cool-down */
 
-/* BAL_CTRL1: configura o temporizador de auto-stop (~10 min).
- * BAL_CTRL2: activa o auto-stop e o ciclo de arrefecimento.
- * Verificar valores exactos contra a tabela de configuração do datasheet. */
 #define BAL_CTRL1_TIMER_10MIN       0x2AU
 #define BAL_CTRL2_AUTOSTOP_EN       0x01U
 
-/* Limites de decisão do algoritmo de balanceamento passivo */
 #define CELL_BALANCE_DELTA_MV       20U     /* Desequilíbrio mínimo para iniciar */
 #define CELL_BALANCE_HYSTERESIS_MV  10U     /* Balancear células > min + histerese */
 #define CELL_BALANCE_MIN_MV         3100U   /* Tensão mínima segura para balancear */
 #define CELL_BALANCE_STOP_MV        5U      /* Parar quando delta < 5 mV */
 
 /* =========================================================================
- * GESTÃO DE ENERGIA — PULSOS DE LINHA TX
- * =========================================================================
- * A mesma linha UART TX (PA0/UART4) é usada para todos os pulsos de controlo de
- * estado. A UART é temporariamente desinicializada e o pino controlado como
- * GPIO puro antes de regressar ao modo UART.
- *
- * Pulso Wake:     2500 µs LOW → SHUTDOWN → WAKE   (já implementado)
- * Pulso Shutdown: 9000 µs LOW → WAKE → SHUTDOWN   (IC low-power mode)
- * HW Reset:      40000 µs LOW → reset completo de toda a rede */
+ * GESTÃO DE ENERGIA — PULSOS DE LINHA TX (PA0/UART4)
+ * ========================================================================= */
 #define DELAY_WAKE_PULSE_US         2500U   /* SHUTDOWN → WAKE (2.5 ms LOW) */
 #define DELAY_SHUTDOWN_PULSE_US     9000U   /* WAKE → SHUTDOWN (9 ms LOW) */
 #define DELAY_HWRESET_PULSE_US      40000U  /* Reset completo da rede (40 ms LOW) */
 #define DELAY_SLEEP_CONTACTOR_MS    100U    /* Aguardar abertura mecânica do contactor */
-/* Latência de propagação na rede daisy-chain isolada de 3 ICs.
- * Usada como margem no timeout DMA RX (BUG-05).
- * 3 ICs × ~300 µs latência estimada = 900 µs → 2000 µs com margem de segurança. */
 #define BMS_DAISY_CHAIN_LATENCY_US  2000U
 #define DELAY_OSC_STAB_MS           2U       /* Estabilização osciladores */
 #define DELAY_WAKE_PROPAGATION_MS   5U       /* Propagação WAKE pela rede */
 #define DELAY_DIR_SEL_SWITCH_US     100U     /* Estabilização após troca DIR_SEL */
 #define DELAY_ADC_SETTLE_MS         10U      /* Estabilização ADC */
-/* Nota: a constante de COMM CLEAR é BMS_COMM_CLEAR_BITS (definida no topo,
- * usada por BMS_CommClear). O antigo DELAY_COMM_CLEAR_BITS era um duplicado
- * órfão e foi removido (MISRA C:2012 Rule 2.5). */
 
 /* =========================================================================
  * LIMITES DE TENSÃO E TEMPERATURA (Software)
  * ========================================================================= */
 #define CELL_UV_MV                  3000U    /* 3000 mV - subtensão */
 #define CELL_OV_MV                  3600U    /* 3600 mV - sobretensão */
-/* Limiares de AVISO (warning) — RESERVADOS para implementação futura de
- * derating/telemetria de aviso antes do fault rígido. Ainda não ligados à
- * lógica de protecção (CELL_UV_MV/CELL_OV_MV são os limiares actuantes). */
-#define CELL_WARN_UV_MV             3100U    /* 3100 mV - aviso subtensão */
-#define CELL_WARN_OV_MV             3500U    /* 3500 mV - aviso sobretensão */
+#define CELL_WARN_UV_MV             3100U    /* 3100 mV - aviso subtensão (reservado) */
+#define CELL_WARN_OV_MV             3500U    /* 3500 mV - aviso sobretensão (reservado) */
 #define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */
 #define CELL_TEMP_WARN_C            55U      /* 55°C - aviso temperatura */
 #define CELL_IMBALANCE_MV           50U      /* 50 mV - desequilíbrio máximo */
@@ -456,18 +344,18 @@ typedef struct {
     BMS_State_t         state;
     uint32_t            fault_flags;            /* OR de todos os slaves */
     bool                ring_intact;            /* Anel fisicamente completo */
-    bool                ring_using_reverse;     /* Estado testemunha (OBS-05): indica que
-                                                 * o firmware está a usar DIR1 após ring break.
-                                                 * Separado de ring_intact para evitar o paradoxo
-                                                 * lógico onde ring_intact=false bloqueava a
-                                                 * tentativa de recovery (ver BUG corrigido v2.4). */
-    volatile bool       contactor_closed;       /* D4: volatile obrigatório — escrito na ISR, lido no super-loop */
+    bool                ring_using_reverse;     /* Testemunha: firmware a usar DIR1 após ring break */
+
+    /* DECISÕES REPORTADAS AO MASTER (sem GPIO neste MCU) */
+    volatile bool       contactor_closed;       /* DECISÃO: contactor deve estar fechado?
+                                                 * (escrito na ISR NFAULT → volatile) */
+    bool                bms_ok;                 /* INTERLOCK lógico BMS_OK reportado ao master */
 
     /* Dados dos Slaves */
     BMS_SlaveData_t     slave[BMS_NUM_SLAVES];
 
     /* Métricas globais */
-    uint32_t            pack_voltage_mv;        /* Soma das tensões — uint32 obrigatório: 30S × 3600 mV = 108 000 mV > UINT16_MAX */
+    uint32_t            pack_voltage_mv;        /* Soma das tensões (uint32: 30S×3600mV>UINT16_MAX) */
     uint16_t            min_cell_mv;
     uint16_t            max_cell_mv;
     uint16_t            delta_cell_mv;          /* Desequilíbrio */
@@ -485,7 +373,7 @@ typedef struct {
 
     /* Pre-carga e tensão HV */
     uint32_t            inverter_voltage_mv;
-    bool                precharge_ready;
+    bool                precharge_ready;        /* PRECHARGE_OK lógico reportado ao master */
 
     /* Balanceamento passivo */
     bool                is_balancing;
@@ -501,7 +389,7 @@ typedef struct {
     /* POST (Power-On Self Test) */
     bool                post_passed;            /* TRUE se POST completou sem erros */
 
-    /* Flag de interrupção NFAULT - acesso atómico obrigatório */
+    /* Flags de interrupção - acesso atómico obrigatório */
     volatile uint32_t   nfault_pending;
     volatile uint32_t   dma_rx_done;
 
@@ -538,7 +426,7 @@ BMS_Status_t BMS_ProcessFaults(BMS_Handle_t *hbms);
 BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms);
 void         BMS_EmergencyShutdown(BMS_Handle_t *hbms);
 
-/* --- Gestão de Potência e Estado --- */
+/* --- Gestão de Potência e Estado (decisões lógicas — sem GPIO) --- */
 void         BMS_ContactorOpen(BMS_Handle_t *hbms);
 void         BMS_ContactorClose(BMS_Handle_t *hbms);
 void         BMS_SendShutdownPulse(BMS_Handle_t *hbms);
