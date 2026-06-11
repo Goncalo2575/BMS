@@ -435,7 +435,7 @@ void         BMS_EnterSleep(BMS_Handle_t *hbms);
 void         BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms);
 
 /* --- Segurança Funcional (ASIL-D) --- */
-void         BMS_IWDG_Init(void);
+
 void         BMS_IWDG_Refresh(void);
 BMS_Status_t BMS_PowerOnSelfTest(BMS_Handle_t *hbms);
 void         BMS_CommClear(BMS_Handle_t *hbms);

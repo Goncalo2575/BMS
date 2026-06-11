@@ -726,14 +726,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  * SECÇÃO: WATCHDOG INDEPENDENTE (IWDG) — corre do LSI, independente do SYSCLK
  * ========================================================================= */
 
-void BMS_IWDG_Init(void)
-{
-    IWDG_HandleTypeDef hiwdg = {0};
-    hiwdg.Instance       = IWDG;
-    hiwdg.Init.Prescaler = BMS_IWDG_PRESCALER;   /* IWDG_PRESCALER_64 */
-    hiwdg.Init.Reload    = BMS_IWDG_RELOAD;       /* 250 → ~500 ms */
-    (void)HAL_IWDG_Init(&hiwdg);
-}
+
 
 void BMS_IWDG_Refresh(void)
 {

@@ -1,2 +1,2 @@
-../Core/Src/bms_master_comm.c:14:6:BMS_MasterComm_Init	16	static
-../Core/Src/bms_master_comm.c:23:6:BMS_MasterComm_PrintDebug	288	static
+../Core/Src/bms_master_comm.c:19:6:BMS_MasterComm_Init	16	static
+../Core/Src/bms_master_comm.c:28:6:BMS_MasterComm_PrintDebug	400	static

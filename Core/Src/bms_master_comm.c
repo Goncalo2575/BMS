@@ -29,7 +29,7 @@ void BMS_MasterComm_PrintDebug(BMS_MasterComm_t *hcomm, BMS_Handle_t *hbms)
 {
     if ((hcomm == NULL) || (hbms == NULL) || (hcomm->huart == NULL)) { return; }
 
-    char line[192];
+    char line[256];
 
     /* Linha única, legível, com os campos essenciais + interlocks reportados
      * ao master (ok=BMS_OK, pre=PRECHARGE_OK, ctor=decisão de contactor).
