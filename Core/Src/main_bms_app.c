@@ -29,7 +29,8 @@
  *    TIM2   -> Internal Clock, Prescaler=83 (1 µs/tick), Period=0xFFFFFFFF, sem IT
  *    EXTI8  -> PA8 GPIO_EXTI8, Falling edge, Pull-up; NVIC EXTI9_5 prioridade 0
  *    HAL Timebase Source -> TIM6 (alimenta HAL_GetTick — cadência de 100 ms)
- *    IWDG   -> DESACTIVAR no CubeMX (BMS_IWDG_Init arranca-o após o boot)
+ *    IWDG   -> ACTIVADO no CubeMX (MX_IWDG_Init): Prescaler=64, Reload=250
+ *              (~500 ms). A aplicação só faz BMS_IWDG_Refresh no super-loop.
  *
  *  ⚠ NOTA DE SEGURANÇA (resumo — detalhe em bq796xx_bms_monitor.c, Secção 9):
  *  A decisão de abrir o contactor é tomada aqui mas actuada no estágio de
@@ -215,6 +216,12 @@ void BMS_Main(void)
     if (status != BMS_OK)
     {
         printf("[BMS] FATAL: Initialization failed! Code: %d\r\n", (int)status);
+        /* AUTO-RECUPERAÇÃO (Via B): este loop NÃO refresca o IWDG de propósito.
+         * O watchdog (armado pelo CubeMX) dispara ao fim de ~500 ms e reinicia
+         * o MCU, que volta a tentar BMS_Init. Cobre falhas transitórias de
+         * arranque do BQ79600 (ruído, bridge ainda a estabilizar). NÃO
+         * adicionar BMS_IWDG_Refresh aqui — isso eliminaria a recuperação e
+         * deixaria o MCU preso sem nunca re-tentar. */
         while (1U)
         {
             BMS_DelayMs(200U);
@@ -232,10 +239,12 @@ void BMS_Main(void)
     printf("[BMS] Telemetry/debug init OK (USART2 PA2/PA3, TX-only)\r\n");
 
     /* ------------------------------------------------------------------
-     * FASE 1c: IWDG Watchdog (ASIL-D) — arranca após o boot
+     * FASE 1c: IWDG Watchdog (ASIL-D)
+     * O IWDG já foi armado pelo CubeMX (MX_IWDG_Init em main.c) ANTES de
+     * BMS_Main. Aqui nada se inicializa — o refresh é feito no super-loop.
+     * Se o arranque tivesse falhado, o watchdog teria resetado e re-tentado.
      * ------------------------------------------------------------------ */
-
-    printf("[BMS] IWDG init OK (timeout ~500 ms)\r\n");
+    printf("[BMS] IWDG active (CubeMX MX_IWDG_Init, timeout ~500 ms)\r\n");
 
     /* ------------------------------------------------------------------
      * FASE 1d: Power-On Self Test (POST)

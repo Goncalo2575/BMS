@@ -96,7 +96,7 @@ BMS_Status_t BMS_ReadAllCellVoltages(BMS_Handle_t *hbms)
     hbms->min_cell_mv     = (min_mv == 0xFFFFU) ? 0U : min_mv;
     hbms->max_cell_mv     = max_mv;
     hbms->delta_cell_mv   = (max_mv > hbms->min_cell_mv) ?
-                             (max_mv - hbms->min_cell_mv) : 0U;
+                             (uint16_t)(max_mv - hbms->min_cell_mv) : 0U;
 
     return BMS_OK;
 }
@@ -165,7 +165,7 @@ static int16_t BMS_RawToTemperature_Ratiometric(uint16_t gpio_raw,
     uint8_t lo = 0U;
     uint8_t hi = BMS_NTC_TABLE_SIZE - 1U;
 
-    while ((hi - lo) > 1U)
+    while (((uint8_t)(hi - lo)) > 1U)
     {
         uint8_t mid = (uint8_t)((lo + hi) / 2U);
         if (ratio_x10000 < (uint32_t)g_ntc_table[mid].ratio_x10000)

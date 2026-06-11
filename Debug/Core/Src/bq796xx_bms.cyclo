@@ -17,6 +17,6 @@
 ../Core/Src/bq796xx_bms.c:678:6:BMS_SendHardwareReset	1
 ../Core/Src/bq796xx_bms.c:697:6:BMS_EnterSleep	1
 ../Core/Src/bq796xx_bms.c:714:6:HAL_GPIO_EXTI_Callback	3
-../Core/Src/bq796xx_bms.c:731:6:BMS_IWDG_Refresh	1
-../Core/Src/bq796xx_bms.c:742:6:BMS_CommClear	1
-../Core/Src/bq796xx_bms.c:765:14:BMS_PowerOnSelfTest	11
+../Core/Src/bq796xx_bms.c:735:6:BMS_IWDG_Refresh	1
+../Core/Src/bq796xx_bms.c:746:6:BMS_CommClear	1
+../Core/Src/bq796xx_bms.c:769:14:BMS_PowerOnSelfTest	11

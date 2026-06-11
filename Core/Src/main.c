@@ -72,6 +72,16 @@ void BMS_Main(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* Redireciona o printf para o USART2 (PA2) — debug/telemetria.
+   * __io_putchar é declarado 'weak' em syscalls.c; esta definição forte
+   * sobrepõe-se e encaminha cada caráter para a UART de debug. */
+  int __io_putchar(int ch)
+  {
+    uint8_t c = (uint8_t)ch;
+    HAL_UART_Transmit(&huart2, &c, 1U, 10U);
+    return ch;
+  }
+
 /* USER CODE END 0 */
 
 /**
@@ -340,12 +350,23 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin : BMS_NFAULT_Pin */
+  GPIO_InitStruct.Pin = BMS_NFAULT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(BMS_NFAULT_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

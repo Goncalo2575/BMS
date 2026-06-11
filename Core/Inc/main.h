@@ -57,6 +57,9 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define BMS_NFAULT_Pin GPIO_PIN_8
+#define BMS_NFAULT_GPIO_Port GPIOA
+#define BMS_NFAULT_EXTI_IRQn EXTI9_5_IRQn
 
 /* USER CODE BEGIN Private defines */
 

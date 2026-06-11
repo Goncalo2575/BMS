@@ -724,9 +724,13 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 /* =========================================================================
  * SECÇÃO: WATCHDOG INDEPENDENTE (IWDG) — corre do LSI, independente do SYSCLK
- * ========================================================================= */
-
-
+ * =========================================================================
+ * Via B: o IWDG é INICIALIZADO pelo CubeMX (MX_IWDG_Init em main.c, com
+ * Prescaler=64 e Reload=250 → ~500 ms). A aplicação NÃO o inicializa; apenas
+ * o refresca aqui. BMS_IWDG_Refresh é self-contained (hiwdg local): o
+ * HAL_IWDG_Refresh só usa o campo .Instance (escreve a chave de reload no
+ * registo KR), pelo que não precisa do handle global do main.c nem dos
+ * parâmetros .Init. Mantém o driver desacoplado do main.c. */
 
 void BMS_IWDG_Refresh(void)
 {

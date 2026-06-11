@@ -50,7 +50,15 @@
  *
  * Configuração: PSC=IWDG_PRESCALER_64, RLR = (500ms × 32000Hz) / 64 = 250
  * Timeout real: ~500 ms. BMS_IWDG_Refresh() em CADA iteração do super-loop.
- * Independente do SYSCLK (84 MHz) — corre do LSI. */
+ * Independente do SYSCLK (84 MHz) — corre do LSI.
+ *
+ * INICIALIZAÇÃO (Via B): o IWDG é inicializado pelo CubeMX (MX_IWDG_Init em
+ * main.c), com estes mesmos parâmetros (Prescaler=64, Reload=250). Fica armado
+ * logo no arranque, ANTES de BMS_Main. Como o boot é curto (~170 ms) face ao
+ * timeout (~500 ms), não há risco de reset prematuro no caminho normal. Se o
+ * arranque falhar e o MCU ficar preso, o IWDG reseta e RE-TENTA o init
+ * (auto-recuperação de falhas transitórias do BQ79600). Os defines abaixo
+ * servem de referência única da configuração e são usados na verificação. */
 #define BMS_IWDG_PRESCALER          IWDG_PRESCALER_64
 #define BMS_IWDG_RELOAD             250U     /* ~500 ms timeout */
 
@@ -435,7 +443,9 @@ void         BMS_EnterSleep(BMS_Handle_t *hbms);
 void         BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms);
 
 /* --- Segurança Funcional (ASIL-D) --- */
-
+/* IWDG inicializado pelo CubeMX (MX_IWDG_Init em main.c). A aplicação apenas
+ * o refresca no super-loop. NÃO existe BMS_IWDG_Init — ver nota na secção
+ * WATCHDOG INDEPENDENTE (IWDG) mais acima. */
 void         BMS_IWDG_Refresh(void);
 BMS_Status_t BMS_PowerOnSelfTest(BMS_Handle_t *hbms);
 void         BMS_CommClear(BMS_Handle_t *hbms);
