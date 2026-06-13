@@ -19,4 +19,4 @@
 ../Core/Src/bq796xx_bms_monitor.c:761:14:BMS_RunPassiveBalancing	16
 ../Core/Src/bq796xx_bms_monitor.c:840:6:BMS_UpdateHardwareInterlocks	5
 ../Core/Src/bq796xx_bms_monitor.c:855:6:BMS_ApplyVoltageFilter	4
-../Core/Src/bq796xx_bms_monitor.c:903:9:BMS_EstimateSoC	6
+../Core/Src/bq796xx_bms_monitor.c:912:9:BMS_EstimateSoC	6

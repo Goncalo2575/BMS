@@ -1,4 +1,5 @@
 "./Core/Src/bms_master_comm.o"
+"./Core/Src/bms_relays.o"
 "./Core/Src/bq796xx_bms.o"
 "./Core/Src/bq796xx_bms_monitor.o"
 "./Core/Src/main.o"

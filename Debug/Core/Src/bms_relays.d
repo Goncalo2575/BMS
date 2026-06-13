@@ -1,4 +1,4 @@
-Core/Src/main_bms_app.o: ../Core/Src/main_bms_app.c \
+Core/Src/bms_relays.o: ../Core/Src/bms_relays.c ../Core/Inc/bms_relays.h \
  ../Core/Inc/bq796xx_bms.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h \
  ../Core/Inc/stm32f4xx_hal_conf.h \
@@ -28,9 +28,8 @@ Core/Src/main_bms_app.o: ../Core/Src/main_bms_app.c \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h \
- ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h \
- ../Core/Inc/bms_master_comm.h ../Core/Inc/bq796xx_bms.h \
- ../Core/Inc/bms_relays.h
+ ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
+../Core/Inc/bms_relays.h:
 ../Core/Inc/bq796xx_bms.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h:
 ../Core/Inc/stm32f4xx_hal_conf.h:
@@ -61,6 +60,3 @@ Core/Src/main_bms_app.o: ../Core/Src/main_bms_app.c \
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h:
-../Core/Inc/bms_master_comm.h:
-../Core/Inc/bq796xx_bms.h:
-../Core/Inc/bms_relays.h:

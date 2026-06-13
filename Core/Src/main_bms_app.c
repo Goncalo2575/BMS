@@ -2,47 +2,29 @@
  * @file    main_bms_app.c
  * @brief   BMS - Aplicação Principal e Ponto de Entrada (Arquitectura Centralizada)
  *
- *  ARQUITECTURA CENTRALIZADA:
- *  Este STM32F446RET6 (placa Master) é o único MCU que governa o pack.
- *  Centraliza a máquina de estados do BMS, a interface com o IMD (Insulation
- *  Monitoring Device) e a telemetria (CAN/UART). DECIDE e REPORTA; a actuação
- *  física do contactor é delegada no estágio de potência.
+ *  Este STM32F446RET6 monitoriza o pack (BQ79600 + 2x BQ79616) E actua a
+ *  malha de segurança/relés (lógica portada da BMS do ano passado — ver
+ *  bms_relays.c). A máquina de estados SAFE/ENGAGED/CHARGING/NOT_SAFE comanda
+ *  pré-carga, descarga, relé do carregador, BMS_relay/BMS_charge e o LED cluster.
  *
- *  PINOUT ACTUAL (apenas PA0-PA3 + PA8):
- *  ┌──────────────────────────────────────────────────────────────┐
- *  │  PA0 (UART4_TX, AF8) ──────► BQ79600 UART_RX                 │
- *  │  PA1 (UART4_RX, AF8) ◄────── BQ79600 UART_TX                 │
- *  │  PA2 (USART2_TX) ──► Debug/Telemetria TX-only ao master      │
- *  │  PA3 (USART2_RX) ── livre (reservado p/ comandos futuros)    │
- *  │  PA8 (EXTI8 FALLING, Pull-Up) ◄── BQ79600 NFAULT (entrada)   │
- *  │  TIM2 (free-running µs)   TIM6 (HAL timebase 1 ms)           │
- *  │  DMA1 (UART4_TX)   DMA1 (UART4_RX)                           │
- *  └──────────────────────────────────────────────────────────────┘
- *  Sem pinos de contactor/interlock neste MCU — as decisões viajam para o
- *  estágio de potência via telemetria + reporte por evento (ver abaixo).
+ *  ⚠ Isto SUPERSEDE a nota "decide e reporta, sem actuação" da v3.2.0: este MCU
+ *  passou a ser o actuador dos relés. Actualizar o FMEA/FTA.
  *
- *  CONFIGURAÇÃO CubeMX OBRIGATÓRIA (clock 84 MHz):
- *    RCC    -> HSI -> PLL: PLLM=16, PLLN=336, PLLP=4 -> SYSCLK 84 MHz
- *    Bus    -> AHB÷1 (84 MHz), APB1÷2 (42 MHz), APB2÷1 (84 MHz)
- *    UART4  -> Asynchronous, 1000000 8N1, DMA RX+TX Normal
- *    USART2 -> Asynchronous, 115200 8N1 (debug/telemetria TX-only)
- *    TIM2   -> Internal Clock, Prescaler=83 (1 µs/tick), Period=0xFFFFFFFF, sem IT
- *    EXTI8  -> PA8 GPIO_EXTI8, Falling edge, Pull-up; NVIC EXTI9_5 prioridade 0
- *    HAL Timebase Source -> TIM6 (alimenta HAL_GetTick — cadência de 100 ms)
- *    IWDG   -> ACTIVADO no CubeMX (MX_IWDG_Init): Prescaler=64, Reload=250
- *              (~500 ms). A aplicação só faz BMS_IWDG_Refresh no super-loop.
+ *  PINOUT (ver bms_relays.h para o mapa completo e conflitos a confirmar):
+ *    PA0/PA1 UART4 (bridge)   PA2/PA3 USART2 (debug TX)   PA8 NFAULT
+ *    Relés:  PC0 pré-carga  PC1 charge  PC2 descarga  PC4 BMS_relay  PA6 BMS_charge
+ *    LED:    PA15 verde  PC11 vermelho  PC12 azul
+ *    Monitor:PB0 IMD  PC8 TSMS  PC6 ESDB  PB14 ESDB_chg  PB12 charger_sig
  *
- *  ⚠ NOTA DE SEGURANÇA (resumo — detalhe em bq796xx_bms_monitor.c, Secção 9):
- *  A decisão de abrir o contactor é tomada aqui mas actuada no estágio de
- *  potência. Para cumprir o FTTI, a decisão é emitida POR EVENTO (reporte
- *  imediato quando contactor_closed/bms_ok mudam), não apenas na telemetria
- *  de 1 Hz. Recomenda-se interlock BMS_OK de HARDWARE dedicado (ASIL-D).
+ *  CONFIG CubeMX (84 MHz): ver bms_relays.h e a nota abaixo. SYS Debug=SWD
+ *  (liberta PA15). IWDG ~500 ms (a pré-carga do ENGAGED é não-bloqueante).
  *
  * @version 3.2.0
  */
 
 #include "bq796xx_bms.h"
 #include "bms_master_comm.h"
+#include "bms_relays.h"
 #include <stdio.h>
 #include <stdbool.h>
 
@@ -64,7 +46,9 @@ extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
  * ========================================================================= */
 
 /**
- * @brief  Lógica de controlo do contactor (decisão lógica reportada ao master)
+ * @brief  Lógica de controlo do contactor (decisão LÓGICA interna).
+ *  Mantida para gating do SoC (relaxação com contactor aberto) e telemetria.
+ *  A ACTUAÇÃO física é feita por BMS_Relays_Task (módulo de relés).
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
@@ -212,16 +196,18 @@ void BMS_Main(void)
     printf("[BMS] Config: %u slaves x %u cells = %u total\r\n",
            BMS_NUM_SLAVES, BMS_CELLS_PER_SLAVE, BMS_TOTAL_CELLS);
 
+    /* Relés + LED em estado seguro ANTES de tudo (BMS relay fechado, contactores
+     * abertos, LEDs apagados). Independente do CubeMX. */
+    BMS_Relays_Init();
+    printf("[BMS] Relays/LED init OK (safe-state)\r\n");
+
     status = BMS_Init(&g_bms, &huart4, &htim2);
     if (status != BMS_OK)
     {
         printf("[BMS] FATAL: Initialization failed! Code: %d\r\n", (int)status);
         /* AUTO-RECUPERAÇÃO (Via B): este loop NÃO refresca o IWDG de propósito.
          * O watchdog (armado pelo CubeMX) dispara ao fim de ~500 ms e reinicia
-         * o MCU, que volta a tentar BMS_Init. Cobre falhas transitórias de
-         * arranque do BQ79600 (ruído, bridge ainda a estabilizar). NÃO
-         * adicionar BMS_IWDG_Refresh aqui — isso eliminaria a recuperação e
-         * deixaria o MCU preso sem nunca re-tentar. */
+         * o MCU, que volta a tentar BMS_Init. NÃO adicionar BMS_IWDG_Refresh. */
         while (1U)
         {
             BMS_DelayMs(200U);
@@ -239,10 +225,7 @@ void BMS_Main(void)
     printf("[BMS] Telemetry/debug init OK (USART2 PA2/PA3, TX-only)\r\n");
 
     /* ------------------------------------------------------------------
-     * FASE 1c: IWDG Watchdog (ASIL-D)
-     * O IWDG já foi armado pelo CubeMX (MX_IWDG_Init em main.c) ANTES de
-     * BMS_Main. Aqui nada se inicializa — o refresh é feito no super-loop.
-     * Se o arranque tivesse falhado, o watchdog teria resetado e re-tentado.
+     * FASE 1c: IWDG Watchdog (ASIL-D) — armado pelo CubeMX (MX_IWDG_Init).
      * ------------------------------------------------------------------ */
     printf("[BMS] IWDG active (CubeMX MX_IWDG_Init, timeout ~500 ms)\r\n");
 
@@ -262,25 +245,28 @@ void BMS_Main(void)
     }
 
     /* ------------------------------------------------------------------
-     * FASE 2: Decisão de fechar contactor se POST e condições iniciais OK
+     * FASE 2: Decisão lógica inicial de contactor (gating de SoC/telemetria;
+     *          actuação física é do módulo de relés).
      * ------------------------------------------------------------------ */
     BMS_DelayMs(100U);
     BMS_ReadAllCellVoltages(&g_bms);
     BMS_ReadAllTemperatures(&g_bms);
-    BMS_UpdateHardwareInterlocks(&g_bms);   /* calcula bms_ok inicial */
+    BMS_ReadInverterVoltage(&g_bms);          /* tensão do bus p/ pré-carga */
+    BMS_UpdateHardwareInterlocks(&g_bms);     /* calcula bms_ok inicial */
 
     if ((g_bms.fault_flags == BMS_FAULT_NONE) && (g_bms.post_passed))
     {
-        printf("[BMS] Conditions OK. Decision: CLOSE contactor (master actuates).\r\n");
+        printf("[BMS] Conditions OK at startup.\r\n");
         BMS_ContactorClose(&g_bms);
     }
     else
     {
-        printf("[BMS] Decision: keep contactor OPEN: %s\r\n",
+        printf("[BMS] Startup with fault: %s\r\n",
                BMS_GetFaultString(g_bms.fault_flags));
     }
 
-    /* Reportar estado inicial ao master e semear os detectores de evento */
+    /* Primeira passagem da malha de segurança/relés + reporte inicial */
+    BMS_Relays_Task(&g_bms, HAL_GetTick());
     BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
     last_contactor_decision = g_bms.contactor_closed;
     last_bms_ok             = g_bms.bms_ok;
@@ -288,7 +274,8 @@ void BMS_Main(void)
     /* ------------------------------------------------------------------
      * FASE 3: Super-loop de operação
      * ------------------------------------------------------------------ */
-    printf("[BMS] Entering monitoring loop.\r\n");
+    printf("[BMS] Entering monitoring loop. Safety state: %s\r\n",
+           BMS_Relays_GetStateString());
 
     last_task_tick = HAL_GetTick();
 
@@ -297,21 +284,25 @@ void BMS_Main(void)
         /* IWDG: refrescar em TODAS as iterações (independente do tick). */
         BMS_IWDG_Refresh();
 
+        /* MALHA DE SEGURANÇA / RELÉS + LED: corre em TODAS as iterações
+         * (debounce dos monitores, blink 1 Hz, pré-carga não-bloqueante). */
+        BMS_Relays_Task(&g_bms, HAL_GetTick());
+
         /* NFAULT fora do tick — processamento imediato. */
         if (__atomic_load_n(&g_bms.nfault_pending, __ATOMIC_SEQ_CST) != 0U)
         {
             BMS_ProcessFaults(&g_bms);
 
-            /* REPORTE POR EVENTO (FTTI): a decisão de abrir tem de chegar ao
-             * estágio de potência de imediato, não no próximo ciclo de 1 Hz. */
+            /* Propagar de imediato à malha de relés (abre BMS relay etc.). */
+            BMS_Relays_Task(&g_bms, HAL_GetTick());
+
             BMS_MasterComm_PrintDebug(&g_master_comm, &g_bms);
             last_contactor_decision = g_bms.contactor_closed;
             last_bms_ok             = g_bms.bms_ok;
             debug_print_div         = 0U;
         }
 
-        /* Cadência de 100 ms via HAL_GetTick (base TIM6). Subtracção unsigned
-         * segura no wraparound de uwTick. */
+        /* Cadência de 100 ms via HAL_GetTick (base TIM6). */
         if ((HAL_GetTick() - last_task_tick) < BMS_TASK_PERIOD_MS)
         {
             BMS_DelayMs(1U);
@@ -322,12 +313,10 @@ void BMS_Main(void)
         /* TAREFA PRINCIPAL DO BMS @ 100 ms */
         status = BMS_Task_100ms(&g_bms);
 
-        /* GESTÃO DA DECISÃO DE CONTACTOR */
+        /* Decisão LÓGICA de contactor (gating de SoC/telemetria) */
         BMS_ContactorControl(&g_bms);
 
-        /* REPORTE POR EVENTO: se a DECISÃO de contactor ou o BMS_OK mudaram,
-         * emitir imediatamente ao master (mitigação de latência — ver nota
-         * de segurança). Não espera pelo heartbeat de 1 Hz. */
+        /* REPORTE POR EVENTO: se a decisão de contactor ou o BMS_OK mudaram. */
         if ((g_bms.contactor_closed != last_contactor_decision) ||
             (g_bms.bms_ok           != last_bms_ok))
         {
