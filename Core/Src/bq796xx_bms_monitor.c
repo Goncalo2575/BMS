@@ -886,18 +886,27 @@ typedef struct { uint16_t mv; uint8_t soc; } SoC_Point_t;
 
 static const SoC_Point_t g_soc_table[BMS_SOC_TABLE_SIZE] =
 {
-    { 3000U,   0U },   /* UV cutoff */
-    { 3100U,   5U },
-    { 3200U,  10U },
-    { 3250U,  20U },
-    { 3270U,  30U },
-    { 3280U,  40U },
-    { 3300U,  50U },   /* Plataforma nominal LFP */
-    { 3310U,  60U },
-    { 3330U,  70U },
-    { 3350U,  80U },
-    { 3400U,  90U },
-    { 3600U, 100U },   /* OV cutoff */
+    { 3000U,   0U },   /* 3.00 V ->   0% (Subtensão Absoluta) */
+    { 3150U,   5U },   /* 3.15 V ->   5% */
+    { 3300U,  10U },   /* 3.30 V ->  10% (Fim do "Joelho" de descarga) */
+    { 3350U,  15U },   /* 3.35 V ->  15% */
+    { 3400U,  20U },   /* 3.40 V ->  20% */
+    { 3450U,  25U },   /* 3.45 V ->  25% */
+    { 3500U,  30U },   /* 3.50 V ->  30% */
+    { 3550U,  35U },   /* 3.55 V ->  35% */
+    { 3600U,  40U },   /* 3.60 V ->  40% */
+    { 3650U,  45U },   /* 3.65 V ->  45% */
+    { 3700U,  50U },   /* 3.70 V ->  50% (Tensão Nominal Termodinâmica) */
+    { 3750U,  55U },   /* 3.75 V ->  55% */
+    { 3800U,  60U },   /* 3.80 V ->  60% */
+    { 3850U,  65U },   /* 3.85 V ->  65% */
+    { 3900U,  70U },   /* 3.90 V ->  70% */
+    { 3950U,  75U },   /* 3.95 V ->  75% */
+    { 4000U,  80U },   /* 4.00 V ->  80% */
+    { 4050U,  85U },   /* 4.05 V ->  85% */
+    { 4100U,  90U },   /* 4.10 V ->  90% */
+    { 4150U,  95U },   /* 4.15 V ->  95% */
+    { 4200U, 100U }    /* 4.20 V -> 100% (Totalmente Carregada) */
 };
 
 uint8_t BMS_EstimateSoC(uint16_t avg_cell_mv)

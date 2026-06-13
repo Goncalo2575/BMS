@@ -72,7 +72,7 @@
 /* =========================================================================
  * ESTIMAÇÃO DE ESTADO DE CARGA (SoC) — OCV Lookup
  * ========================================================================= */
-#define BMS_SOC_TABLE_SIZE          12U
+#define BMS_SOC_TABLE_SIZE          21U
 
 /* =========================================================================
  * COMM CLEAR (Protocolo BQ79600)
@@ -156,7 +156,7 @@
 #define BMS_AUX_READ_BYTES          10U   /* GPIO1+GPIO2+GPIO3+GPIO4+TSREF = 5x2 */
 
 /* Pre-carga HV Bus (GPIO4) */
-#define HV_BUS_ATTENUATION_RATIO    30U       /* Verificar divisor resistivo PCB */
+#define HV_BUS_ATTENUATION_RATIO    27U       /* divisor resistivo da 27,110 */
 #define PRECHARGE_THRESHOLD_MV      113400UL  /* 90% * 126V */
 
 /* =========================================================================
@@ -224,11 +224,11 @@
 
 #define ACTIVE_CELL_15S             0x0FU
 
-/* Thresholds de tensão dos comparadores autónomos de hardware
- *   V_OV = 2700 mV + OV_THRESH × 25 mV → 0x24 (36) = 3600 mV
- *   V_UV = 2100 mV + UV_THRESH × 25 mV → 0x24 (36) = 3000 mV */
-#define OV_THRESH_VAL               0x24U   /* 2700 + 36×25 = 3600 mV */
-#define UV_THRESH_VAL               0x24U   /* 2100 + 36×25 = 3000 mV */
+/* Thresholds de tensão dos comparadores autónomos de hardware (NMC)
+ * V_OV = 2700 mV + OV_THRESH × 25 mV → 0x3E (62) = 4250 mV
+ * V_UV = 2100 mV + UV_THRESH × 25 mV → 0x24 (36) = 3000 mV */
+#define OV_THRESH_VAL               0x3EU   /* 4250 mV - Falha hardware de Sobretensão */
+#define UV_THRESH_VAL               0x24U   /* 3000 mV - Falha hardware de Subtensão */
 
 /* =========================================================================
  * BALANCEAMENTO CELULAR PASSIVO (BQ79616-Q1)
@@ -243,7 +243,7 @@
 
 #define CELL_BALANCE_DELTA_MV       20U     /* Desequilíbrio mínimo para iniciar */
 #define CELL_BALANCE_HYSTERESIS_MV  10U     /* Balancear células > min + histerese */
-#define CELL_BALANCE_MIN_MV         3100U   /* Tensão mínima segura para balancear */
+#define CELL_BALANCE_MIN_MV         3800U   /* Tensão mínima para iniciar balanceamento (NMC Top-Balancing) */
 #define CELL_BALANCE_STOP_MV        5U      /* Parar quando delta < 5 mV */
 
 /* =========================================================================
@@ -262,10 +262,10 @@
 /* =========================================================================
  * LIMITES DE TENSÃO E TEMPERATURA (Software)
  * ========================================================================= */
-#define CELL_UV_MV                  3000U    /* 3000 mV - subtensão */
-#define CELL_OV_MV                  3600U    /* 3600 mV - sobretensão */
+#define CELL_OV_MV                  4250U   /* Falha por Sobretensão absoluta (Over-Voltage): 4.25 V */
+#define CELL_UV_MV                  3000U   /* Falha por Subtensão absoluta (Under-Voltage): 3.00 V */
 #define CELL_WARN_UV_MV             3100U    /* 3100 mV - aviso subtensão (reservado) */
-#define CELL_WARN_OV_MV             3500U    /* 3500 mV - aviso sobretensão (reservado) */
+#define CELL_WARN_OV_MV             4150U    /* 4150 mV - aviso de sobretensão (aproximação do limite) */
 #define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */
 #define CELL_TEMP_WARN_C            55U      /* 55°C - aviso temperatura */
 #define CELL_IMBALANCE_MV           50U      /* 50 mV - desequilíbrio máximo */
@@ -438,7 +438,7 @@ void         BMS_EmergencyShutdown(BMS_Handle_t *hbms);
 void         BMS_ContactorOpen(BMS_Handle_t *hbms);
 void         BMS_ContactorClose(BMS_Handle_t *hbms);
 void         BMS_SendShutdownPulse(BMS_Handle_t *hbms);
-void         BMS_SendHardwareReset(BMS_Handle_t *hbms);
+//void         BMS_SendHardwareReset(BMS_Handle_t *hbms);   //nao e usada
 void         BMS_EnterSleep(BMS_Handle_t *hbms);
 void         BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms);
 

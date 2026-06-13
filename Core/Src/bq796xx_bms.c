@@ -41,7 +41,21 @@ void BMS_DelayMs(uint32_t ms)
  *  timer-clock de APB1 dê 1 MHz — a 84 MHz com APB1÷2 o timer corre a 84 MHz,
  *  logo PSC=83). Wraparound do contador de 32 bits a ~51 s — muito acima do
  *  delay máximo usado (40 ms no HW reset).
+ * 
+ * 
+ * O protocolo de comunicação dos chips BQ796xx da Texas Instruments exige 
+ * timings elétricos muito rigorosos para acordar ou adormecer a rede. 
+ * Por exemplo, o pulso de WAKE tem de durar 2500 µs (2.5 milissegundos). 
+ * Usar a função HAL_Delay() baseada no SysTick (que apenas tem precisão de 1 milissegundo) 
+ * seria demasiado impreciso. A função BMS_DelayUs, ao ler diretamente o hardware 
+ * de um temporizador a rodar a 1 MHz (1 tick = 1 µs), consegue fazer essa pausa 
+ * com precisão cirúrgica sem criar o "overhead" (peso no processador) de estar a gerir interrupções. 
+ * Além disso, o texto acerta ao mencionar o fallback (o ciclo while cego)
+ * caso o temporizador falhe ou não seja inicializado.
  */
+
+
+
 void BMS_DelayUs(BMS_Handle_t *hbms, uint32_t us)
 {
     if (hbms->htim_delay != NULL)
@@ -61,6 +75,17 @@ void BMS_DelayUs(BMS_Handle_t *hbms, uint32_t us)
 
 /**
  * @brief  Calcula CRC-16-IBM (polinómio 0x8005 reflexo = 0xA001), init 0xFFFF, LSB-first
+ *
+ * Calcula uma "assinatura matemática" (Cyclic Redundancy Check) para garantir a 
+ * integridade das mensagens enviadas e recebidas pela Daisy-Chain. Num ambiente de veículo elétrico, 
+ * o ruído eletromagnético dos inversores e motores pode facilmente alterar (corromper) um bit de 
+ * dados nos cabos de comunicação. Sem o CRC, um bit corrompido poderia transformar uma leitura de 
+ * tensão normal numa falsa leitura de sobretensão, forçando o BMS a desligar o carro indevidamente.
+ * 
+ * O emissor calcula este valor de 16 bits para todos os 
+ * bytes do pacote e anexa-o no final. O recetor recalcula-o e compara-o com o recebido. Se divergirem, 
+ * o pacote é descartado de imediato (silenciosamente protegido contra lixo informático).
+ * O algoritmo é o CRC-16-IBM, que é um padrão comum e é o mesmo usado pelos chips BQ796xx.
  */
 uint16_t BMS_CalculateCRC16(uint8_t *data, uint16_t length)
 {
@@ -90,6 +115,29 @@ uint16_t BMS_CalculateCRC16(uint8_t *data, uint16_t length)
 
 /**
  * @brief  Transmite um frame e recebe a resposta via DMA (Full-Duplex Async)
+ *
+ *
+ *
+ * Como funciona (Passo a passo):
+ * 1. Preparação (DMA RX): Se espera resposta, "arma" a receção via DMA antes sequer de falar. 
+ *    Isto garante que o HW já está à escuta e não perde o 1º byte que chega a alta velocidade.
+ * 2. Transmissão (TX): Envia a mensagem a 1 Mbps.
+ * 3. Espera com Timeout: Fica num ciclo a aguardar que o DMA receba todos os bytes (a flag 
+ *    dma_rx_done muda para 1). Tem um limite de tempo estrito; se a linha cair (cabo cortado),
+ *    ele aborta, regista o erro e limpa a linha (CommClear) para não bloquear o sistema.
+ * 4. Validação HW: Verifica se houve "Overrun" (hardware engasgado com excesso de dados).
+ * 5. Escrita simples: Se for um comando sem resposta (ex: Broadcast Write), apenas transmite.
+ *
+ * @note Resumo da lógica: Esta função recebe a estrutura BMSHandle que contém as 
+ * informações das flags, DMA, UART, contagem de erros, e os dados de TX e RX com o 
+ * seu respetivo comprimento. Estes dados não vão para o USART2 (exterior/debug), mas sim 
+ * para a UART4 que fala diretamente com a Bridge e Slaves. Para isso, a função começa 
+ * por se colocar à escuta ativando o DMA e metendo a flag dma_rx_done a 0. A seguir 
+ * envia os dados (TX) e entra num 'while' onde o processador engonha à espera da resposta. 
+ * Como já se conhecem os tempos normais de resposta, há um "timeout" rigoroso; se não 
+ * for cumprido, a transmissão aborta, adiciona um erro de comunicação e limpa a linha. 
+ * No fim, há ainda uma verificação da flag ORE para garantir que o hardware não se 
+ * "engasgou" com informação a chegar rápido demais. Se vier lixo, descarta e avança!
  */
 static BMS_Status_t BMS_Transceive(BMS_Handle_t *hbms,
                                     uint8_t *tx_data, uint16_t tx_len,
@@ -161,6 +209,14 @@ static BMS_Status_t BMS_Transceive(BMS_Handle_t *hbms,
 
 /**
  * @brief  Callback HAL para a recepção DMA do BQ79600 (UART4)
+ *
+ * Para que serve: É a "campainha" do hardware. Esta função não é chamada
+ * pelo código principal, mas sim disparada automaticamente pelo próprio hardware
+ * (STM32) quando o DMA termina de receber exatamente o número de bytes pedidos.
+ *
+ * Como funciona: Quando o último byte da resposta chega da bateria, a
+ * execução do CPU salta para aqui. Ela verifica se o aviso vem da UART correta e
+ * altera a flag `dma_rx_done` para 1, libertando o `while` na função `BMS_Transceive`.
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -174,8 +230,29 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 /**
  * @brief  Escrita Single Device (com DEV_ADR no frame)
- *         Formato: INIT(1) + DEV_ADR(1) + REG_ADR(2) + DATA(n) + CRC(2)
+ *
+ * Para que serve: Serve para enviar uma ordem ou comando para APENAS UM chip 
+ * específico da rede, ignorando todos os outros. 
+ *
+ * Exemplos práticos no projeto:
+ * - Balanceamento: Mandar apenas o Slave 2 ligar a resistência para descarregar 
+ *   a sua Célula 3, deixando o Slave 1 inalterado.
+ * - Endereçamento (AutoAddressing): Dizer exclusivamente ao último chip da rede que 
+ *   ele é o "Fim da Linha" (TOP_STACK), para que o cabo de comunicação não encrave.
+ * 
+ * Como funciona (Construção do Pacote/Frame):
+ * 1. Validação: Verifica se os dados são válidos (não nulos e de 1 a 8 bytes).
+ * 2. Cabeçalho (INIT): Cria o byte inicial que diz "Isto é uma escrita singular".
+ * 3. Endereço (DEV_ADR): Adiciona a 'morada' do chip alvo (ex: 0x01).
+ * 4. Registo (REG_ADR): Adiciona em qual "gaveta" (registo) de memória do chip quer escrever.
+ * 5. Dados e Assinatura: Junta os dados, calcula o CRC-16 para segurança e entrega 
+ *    tudo à função `BMS_Transceive` para fazer o envio físico pelo cabo.
+ * 
+ * Write: Constrói pacote com dados -> Envia -> Vai à sua vida.
+ * 
  */
+
+ 
 BMS_Status_t BMS_WriteSingleDevice(BMS_Handle_t *hbms, uint8_t dev_addr,
                                     uint16_t reg_addr, uint8_t *data,
                                     uint8_t data_len)
@@ -207,8 +284,25 @@ BMS_Status_t BMS_WriteSingleDevice(BMS_Handle_t *hbms, uint8_t dev_addr,
 
 /**
  * @brief  Leitura Single Device
- *    TX: [INIT_BASE_SINGLE_READ][DEV][REG_H][REG_L][(N-1)][CRC_L][CRC_H] = 7 bytes
+ *
+ * Para que serve: Interroga APENAS UM chip específico e fica à espera que 
+ * ele devolva a resposta. É usado, por exemplo, para ler a tensão global 
+ * do inversor (HV) que está ligada apenas ao Slave 1.
+ *
+ * Como funciona (O processo de Pergunta-Resposta):
+ * 1. Constrói a Pergunta (TX): Em vez de enviar dados, envia um byte extra `(data_len - 1)`
+ *    que diz ao chip quantos bytes de informação o STM32 quer receber de volta.
+ * 2. Transceive: Envia a pergunta e arma o DMA para ficar ativamente à escuta da resposta.
+ * 3. Barreira de Segurança (CRC): Quando a resposta chega, a primeira coisa que faz é 
+ *    recalcular a assinatura matemática. Se a mensagem foi corrompida por ruído, aborta!
+ * 4. Extração: O chip responde ecoando o cabeçalho (4 bytes). A função ignora esse eco 
+ *    e extrai apenas a "carne" (os dados reais) guardando-os no buffer do utilizador.
+ * 
+ * Read: Constrói pacote com o número de bytes que quer -> Envia -> Fica à escuta ->
+ *  -> Recebe -> Verifica Segurança (CRC) -> Extrai a informação útil.
  */
+
+ 
 BMS_Status_t BMS_ReadSingleDevice(BMS_Handle_t *hbms, uint8_t dev_addr,
                                    uint16_t reg_addr, uint8_t *rx_data,
                                    uint8_t data_len)
@@ -261,6 +355,22 @@ BMS_Status_t BMS_ReadSingleDevice(BMS_Handle_t *hbms, uint8_t dev_addr,
 
 /**
  * @brief  Escrita Broadcast (sem DEV_ADR)
+ *
+ * Para que serve: Serve para enviar uma ordem para TODOS as slaves da rede
+ * em simultâneo. É o equivalente a falar num megafone para toda a fábrica.
+ * contudo nao fica a espera de resposta tal como o BMS_WriteSingleDevice)
+ * 
+ * Exemplos práticos no projeto:
+ * - Limpeza de Falhas: Enviar o comando para limpar os latches de erro (FAULT_RST) 
+ *   em todos os slaves com apenas uma mensagem ultra-rápida.
+ *
+ * Como funciona (A magia da eficiência):
+ * O pacote construído AQUI NÃO TEM o byte da Morada (DEV_ADR). Como a mensagem 
+ * começa com o byte especial de Broadcast (0x88), os chips já sabem que não há 
+ * destinatário e o byte seguinte é logo o Registo. O pacote fica mais curto e rápido!
+ * 
+ * 
+ *  
  */
 BMS_Status_t BMS_WriteBroadcast(BMS_Handle_t *hbms, uint16_t reg_addr,
                                  uint8_t *data, uint8_t data_len)
@@ -291,7 +401,20 @@ BMS_Status_t BMS_WriteBroadcast(BMS_Handle_t *hbms, uint16_t reg_addr,
 
 /**
  * @brief  Leitura Broadcast
- *    TX: [INIT_BASE_BROADCAST_READ][REG_H][REG_L][(N-1)][CRC_L][CRC_H] = 6 bytes
+ *
+ * Para que serve: Faz uma pergunta a TODOS os slaves da rede simultaneamente e 
+ * recolhe as respostas de todos num único grande "comboio" de dados. É incrivelmente 
+ * rápido para ler falhas de todo o pack da bateria de uma só vez. Ficam a espera de resposta, 
+ * mas o processo é otimizado para ser o mais eficiente possível.
+ *
+ * Como funciona (A Inversão Topológica):
+ * 1. O STM32 envia o pedido (sem morada).
+ * 2. O chip mais distante (TOP_STACK / Slave 2) responde primeiro. O Slave 1 anexa a sua 
+ *    resposta a seguir, criando um fluxo contínuo de bytes.
+ * 3. A função recebe este bloco gigante via DMA.
+ * 4. Ao desempacotar, como o Slave 2 chegou primeiro, a função faz uma inversão matemática 
+ *     para colocar os dados do Slave 2 no 
+ *    índice correto do array lógico, e valida o CRC de CADA slave individualmente.
  */
 BMS_Status_t BMS_ReadBroadcast(BMS_Handle_t *hbms, uint16_t reg_addr,
                                 uint8_t *rx_data, uint8_t data_len_per_dev)
@@ -355,6 +478,18 @@ BMS_Status_t BMS_ReadBroadcast(BMS_Handle_t *hbms, uint16_t reg_addr,
 
 /**
  * @brief  Escrita Broadcast Reversa para configuração do caminho DIR1
+ *
+ * Para que serve: Envia uma mensagem global, mas "pela porta das traseiras" (DIR1).
+ * É fundamental para a topologia em Anel (Ring). Se o cabo principal partir, o 
+ * STM32 consegue falar com os slaves pelo caminho inverso.
+ *
+ * Onde é usada: Principalmente na fase de Inicialização (BMS_AutoAddressing). 
+ * O Cérebro usa esta função para pré-configurar os endereços reversos de todos 
+ * os chips, preparando-os para o pior cenário.
+ *
+ * O detalhe técnico: Ao contrário da Broadcast normal que tem o byte INIT 
+ * fixo (0x88), esta recebe o init_base como parâmetro, porque o comando reverso 
+ * exige um byte mágico especial (0xF8) para os chips saberem de onde vem a ordem.
  */
 BMS_Status_t BMS_WriteBroadcastReverse(BMS_Handle_t *hbms, uint16_t reg_addr,
                                         uint8_t init_base, uint8_t *data,
@@ -389,6 +524,16 @@ BMS_Status_t BMS_WriteBroadcastReverse(BMS_Handle_t *hbms, uint16_t reg_addr,
 
 /**
  * @brief  Pulso WAKE - força TX (PA0) ao nível LOW para acordar a Bridge
+ *
+ * Para que serve: Quando o carro está desligado, os chips da bateria entram
+ * em sono profundo (SHUTDOWN) para não consumirem energia. Para os acordar,
+ * o protocolo da TI exige um pulso elétrico muito específico de 2.5 milissegundos.
+ *
+ * O Truque de Hardware: Uma porta série (UART) envia dados e não consegue gerar 
+ * facilmente um pulso contínuo de 2.5ms. Por isso, esta função "rouba" o pino TX 
+ * à UART, transforma-o num pino de saída normal (GPIO), puxa-o para LOW (0V) 
+ * durante exatamente 2500 µs, volta a pô-lo em HIGH e, no fim, devolve o pino à UART.
+ * Aguarda ainda 2 ms para que os osciladores internos da Bridge estabilizem.
  */
 static void BMS_SendWakePulse(BMS_Handle_t *hbms)
 {
@@ -411,6 +556,15 @@ static void BMS_SendWakePulse(BMS_Handle_t *hbms)
 
 /**
  * @brief  Sincronização DLL - 8 dummy stack writes para ECC_DATA1..8
+ *
+ * Para que serve: É o "Teste de Relógio" da rede. Após os chips acordarem, os 
+ * seus relógios internos precisam de se calibrar à velocidade de 1 Mbps da UART.
+ * 
+ * Como funciona: O STM32 envia 8 mensagens Broadcast consecutivas (de valor 0x00) 
+ * para os registos seguros ECC_DATA (que não afetam a configuração do chip). 
+ * Estas transições elétricas no cabo permitem à DLL (Delay-Locked Loop) de cada 
+ * chip afinar o seu recetor para não perder nenhum bit nas mensagens seguintes, 
+ * que já serão ordens críticas (como atribuir moradas).
  */
 static BMS_Status_t BMS_SyncDLL(BMS_Handle_t *hbms)
 {
@@ -430,6 +584,22 @@ static BMS_Status_t BMS_SyncDLL(BMS_Handle_t *hbms)
 
 /**
  * @brief  Endereçamento automático da rede daisy-chain
+ *
+ * Para que serve: É a "Chamada de Presenças" e atribuição de lugares. 
+ * Quando o carro liga, os chips não sabem quem são nem onde estão no cabo.
+ * Esta função acorda-os, afina-os e dá a cada um uma "morada" oficial.
+ *
+ * Como funciona (O Truque do ADDR_WR):
+ * 1. O STM32 ativa o modo "Address Write" (ADDR_WR).
+ * 2. Envia um Broadcast com a morada 0x00. A Bridge (1º chip) apanha-a, guarda para si 
+ *    e "fecha a sua porta" a novos endereços.
+ * 3. Envia Broadcast 0x01. A Bridge já tem morada, por isso passa para a frente. O Slave 1 
+ *    apanha-a, guarda para si e fecha a porta. E assim sucessivamente.
+ * 4. Fim da Linha: Diz ao último Slave que ele é o topo da pilha (TOP_STACK) para ele saber 
+ *    que tem de devolver o sinal para trás.
+ * 5. Via de Emergência (DIR1): A Bridge muda a direção da agulha para o cabo traseiro e 
+ *    repete a chamada ao contrário (usando os comandos Reverse), preparando 
+ *    os endereços alternativos caso o cabo principal parta no futuro!
  */
 BMS_Status_t BMS_AutoAddressing(BMS_Handle_t *hbms)
 {
@@ -541,7 +711,18 @@ BMS_Status_t BMS_AutoAddressing(BMS_Handle_t *hbms)
 }
 
 /**
- * @brief  Configura ambos os slaves para 15 células
+ * @brief  Configura ambos os slaves para 15 células e define proteções (Regras do Jogo)
+ *
+ * Para que serve: Define os limites de segurança de hardware, os filtros de ruído, 
+ * os temporizadores de balanceamento e manda os conversores (ADCs) iniciarem as leituras.
+ *
+ * Como funciona (Passo a Passo por Slave):
+ * 1. ACTIVE_CELL: Avisa o slave que só tem 15 células ligadas.
+ * 2. OV_THRESH / UV_THRESH: Define os limites físicos de OV (3600mV) e UV (3000mV).
+ * 3. ADC_CONF / OVUV_CTRL: Liga os filtros passa-baixo e ativa as proteções autónomas.
+ * 4. BAL_CTRL: Define segurança térmica (ex: autostop do balanceamento aos 10 minutos).
+ * 5. ADC_CTRL1: Dá o comando MAIN_GO para iniciar as medições ADC em ciclo contínuo.
+ * 6. Aguarda 10ms no final para garantir que as primeiras amostras do ADC estão prontas.
  */
 BMS_Status_t BMS_ConfigureSlaves(BMS_Handle_t *hbms)
 {
@@ -605,7 +786,19 @@ BMS_Status_t BMS_ConfigureSlaves(BMS_Handle_t *hbms)
 }
 
 /**
- * @brief  Inicialização completa do BMS
+ * @brief  Inicialização completa do BMS (O Maestro do Arranque)
+ *
+ * Para que serve: Liga a estrutura de software do BMS ao hardware do STM32, 
+ * limpa todo o lixo de memória e orquestra a sequência de arranque da Daisy-Chain.
+ *
+ * Como funciona (Passo a Passo):
+ * 1. Limpeza: Faz um memset a 0 a todo o handle para apagar "lixo" na RAM.
+ * 2. Setup HW: Associa a UART e liga o Timer de microssegundos (TIM2) em roda livre.
+ * 3. Ponte IRQ: Regista o handle em `g_hbms_irq` para as interrupções de HW (DMA 
+ *    e EXTI/NFAULT) saberem com quem falar.
+ * 4. Acordar e Mapear: Executa a auto-configuração de endereços (AutoAddressing).
+ * 5. Proteger e Ligar: Envia as proteções e ativa as leituras ADC (ConfigureSlaves).
+ * 6. Sucesso: Se os passos 4 e 5 não derem erro, muda o estado para MONITORING.
  */
 BMS_Status_t BMS_Init(BMS_Handle_t *hbms, UART_HandleTypeDef *huart,
                        TIM_HandleTypeDef *htim)
@@ -655,7 +848,18 @@ BMS_Status_t BMS_Init(BMS_Handle_t *hbms, UART_HandleTypeDef *huart,
 /* =========================================================================
  * GESTÃO DE ENERGIA — PULSOS DE CONTROLO DE ESTADO (linha TX PA0)
  * ========================================================================= */
-
+/**
+ * @brief  Pulso SHUTDOWN - Força TX ao nível LOW por 9ms para adormecer a rede
+ *
+ * Para que serve: Coloca todos os chips da bateria em modo de sono profundo 
+ * (baixo consumo) para poupar a bateria do carro quando este está 
+ * desligado ou após uma falha crítica.
+ *
+ * Como funciona: Tal como o pulso de WAKE, "rouba" o pino da UART para o 
+ * controlar manualmente. A diferença fundamental é o tempo: no protocolo da 
+ * Texas Instruments, um pulso LOW de exatamente 9 ms significa "Shutdown". 
+ * No final, devolve o pino e atualiza a máquina de estados para SLEEP.
+ */
 void BMS_SendShutdownPulse(BMS_Handle_t *hbms)
 {
     HAL_UART_DeInit(hbms->huart);
@@ -675,6 +879,30 @@ void BMS_SendShutdownPulse(BMS_Handle_t *hbms)
     hbms->state = BMS_STATE_SLEEP;
 }
 
+/**
+ * @brief  Pulso de Hardware Reset - Força TX a LOW por 40ms para reiniciar a rede
+ *
+ * Para que serve: É o "botão de pânico" ou "Hard Reset" absoluto. Quando as comunicações
+ * falham gravemente e os chips não respondem a nada, o BMS usa esta função para forçar
+ * fisicamente todos os chips da bateria a reiniciarem (apagando memórias, endereços e falhas).
+ *
+ * Como funciona: Puxa o pino de comunicação para 0V durante um tempo gigante (40 milissegundos).
+ * No protocolo da TI, isto força um reset total de hardware. No final, atualiza a máquina de
+ * estados para UNINITIALIZED, obrigando o Cérebro a correr o BMS_Init() todo de novo.
+ * 
+ * 
+ * Esta funçao nao é utilizada contudo esta no manual da TI!!
+ * Em vez de tentar fazer um Reset aos chips da bateria com 
+ * o carro a trabalhar, a aplicação atual prefere:
+ * -Tentar limpar as falhas por software (BMS_FaultRecoveryAttempt).
+ * -Se falhar 3 vezes seguidas, ele "desiste", abre o contactor e chama o BMS_EnterSleep()
+ *  (que manda o pulso de 9ms) para adormecer tudo em segurança e poupar energia.
+ * -Se houver um bloqueio total, em vez de reiniciar apenas a bateria, 
+ * ele deixa o cão de guarda (Watchdog / IWDG) morder e reinicia a placa STM32 inteira!
+ 
+
+
+
 void BMS_SendHardwareReset(BMS_Handle_t *hbms)
 {
     HAL_UART_DeInit(hbms->huart);
@@ -687,13 +915,28 @@ void BMS_SendHardwareReset(BMS_Handle_t *hbms)
     HAL_GPIO_Init(BMS_BRIDGE_TX_PORT, &gpio_cfg);
 
     HAL_GPIO_WritePin(BMS_BRIDGE_TX_PORT, BMS_BRIDGE_TX_PIN, GPIO_PIN_RESET);
-    BMS_DelayUs(hbms, DELAY_HWRESET_PULSE_US);              /* 40 000 µs */
+    BMS_DelayUs(hbms, DELAY_HWRESET_PULSE_US);              // 40 000 µs 
     HAL_GPIO_WritePin(BMS_BRIDGE_TX_PORT, BMS_BRIDGE_TX_PIN, GPIO_PIN_SET);
 
     HAL_UART_Init(hbms->huart);
-    hbms->state = BMS_STATE_UNINITIALIZED;   /* Requer BMS_Init() após reset */
+    hbms->state = BMS_STATE_UNINITIALIZED;   // Requer BMS_Init() após reset 
 }
 
+*/
+
+
+/**
+ * @brief  Adormece o pack de bateria com segurança absoluta
+ *
+ * Para que serve: Desliga o sistema de forma controlada. Em vez de simplesmente 
+ * "ir dormir", garante que o hardware fica num estado seguro a longo prazo.
+ *
+ * Como funciona (Passo a Passo de Segurança):
+ * 1. Pára o Balanceamento: Evita que as células continuem a descarregar enquanto o BMS dorme.
+ * 2. Abre o Contactor: Dá ordem para isolar a Alta Tensão do resto do veículo.
+ * 3. Espera Mecânica: Aguarda 100ms para garantir que o relé físico tem tempo de abrir.
+ * 4. Põe a Rede a Dormir: Envia o pulso de 9ms para os chips pouparem a bateria de 12V.
+ */
 void BMS_EnterSleep(BMS_Handle_t *hbms)
 {
     (void)BMS_StopAllBalancing(hbms);
@@ -711,6 +954,26 @@ void BMS_EnterSleep(BMS_Handle_t *hbms)
  * g_hbms_irq é static neste ficheiro — daí o callback residir aqui.
  * PA8 → linha EXTI8 → vector EXTI9_5_IRQHandler (gerado pelo CubeMX). */
 
+/**
+ * @brief  Callback de Interrupção de Hardware - O Alarme de Incêndio (NFAULT)
+ *
+ * Para que serve: Lida com emergências detetadas autonomamente pelo hardware da bateria 
+ * (ex: sobretensão gravíssima). Reage instantaneamente sem esperar pelo ciclo normal do código.
+ *
+ * Como funciona: Quando um chip escravo deteta perigo, ele puxa fisicamente o cabo NFAULT 
+ * para 0V. O STM32 deteta essa queda (Falling Edge) no pino PA8 e salta imediatamente para 
+ * esta função, pausando tudo o resto. A função confirma a origem do alarme e chama o 
+ * tratador (BMS_NFAULT_IRQHandler) que vai dar ordem imediata para abrir o contactor!
+ *
+ * O detalhe técnico: Esta função é uma "Callback" de EXTI (External Interrupt) definida pela HAL da STMicroelectronics.
+ * Esta função usa o mecanismo de "Funções Fracas" (__weak) da HAL. Quando o alarme
+ * de HW dispara, o STM32 salta internamente para a ISR (EXTI9_5_IRQHandler), limpa a 
+ * flag de hardware e chama automaticamente esta Callback. Ao definirmos esta 
+ * função aqui, "sobrepomos" a função vazia da biblioteca da STMicroelectronics, 
+ * garantindo um tempo de reação de microssegundos de forma 100% invisível ao ciclo main!
+ */
+
+ 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == BMS_NFAULT_PIN)   /* PA8 */
@@ -730,8 +993,20 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  * o refresca aqui. BMS_IWDG_Refresh é self-contained (hiwdg local): o
  * HAL_IWDG_Refresh só usa o campo .Instance (escreve a chave de reload no
  * registo KR), pelo que não precisa do handle global do main.c nem dos
- * parâmetros .Init. Mantém o driver desacoplado do main.c. */
-
+ * parâmetros .Init. Mantém o driver desacoplado do main.c. 
+ * 
+ * 
+ * @brief  Alimenta o "Cão de Guarda" (IWDG - Independent Watchdog)
+ *
+ * Para que serve: Barreira de segurança ASIL-D suprema. O IWDG é um temporizador 
+ * de hardware isolado que reinicia o STM32 se o software "encravar" (freeze).
+ *
+ * Como funciona: O temporizador está configurado para "morder" ao fim de ~500ms. 
+ * O ciclo principal do BMS tem de chamar esta função constantemente para fazer o 
+ * reset ao relógio. A genialidade aqui é usar uma estrutura local `hiwdg`, pois a 
+ * HAL só precisa do ponteiro para o registo do hardware para enviar o comando de 
+ * refresh, mantendo este ficheiro independente do `main.c`!
+ */
 void BMS_IWDG_Refresh(void)
 {
     IWDG_HandleTypeDef hiwdg = {0};
@@ -743,6 +1018,18 @@ void BMS_IWDG_Refresh(void)
  * SECÇÃO: COMM CLEAR (Reset da State Machine do Receptor UART)
  * ========================================================================= */
 
+/**
+ * @brief  Comm Clear - Envia um sinal de "Break" para desencravar a comunicação
+ *
+ * Para que serve: É o "limpar a garganta" do sistema. Se houver ruído no cabo e os
+ * chips perderem a sincronia dos bytes (ficando à espera de um fim de mensagem que 
+ * nunca chega), esta função força-os a limpar os buffers e recomeçar do zero.
+ *
+ * Como funciona: Transforma o pino TX num interruptor manual e puxa-o a 0V durante 18 µs.
+ * A 1 Mbps, cada bit demora 1 µs. O protocolo UART normal usa no máximo ~9 bits seguidos a zero. 
+ * Ao forçar 18 zeros seguidos ("Break Condition"), os chips percebem a violação do 
+ * protocolo, abortam qualquer receção a meio e preparam-se para a próxima mensagem.
+ */
 void BMS_CommClear(BMS_Handle_t *hbms)
 {
     HAL_UART_DeInit(hbms->huart);
@@ -766,6 +1053,20 @@ void BMS_CommClear(BMS_Handle_t *hbms)
  * SECÇÃO: POWER-ON SELF TEST (POST)
  * ========================================================================= */
 
+/**
+ * @brief  Power-On Self Test (POST) - Exame médico de admissão do BMS
+ *
+ * Para que serve: Barreira de segurança ASIL-D obrigatória antes de ligar a Alta Tensão.
+ * O BMS testa os seus próprios componentes físicos e matemáticos para provar que está 
+ * saudável antes de sequer considerar fechar o contactor.
+ *
+ * Como funciona (Os 4 Testes):
+ * 1. CRC Sanity: Verifica se a ALU do STM32 está sã, calculando um CRC conhecido ("123456789" = 0x4B37).
+ * 2. Comms Sanity: Lê o registo ACTIVE_CELL de todos os slaves para garantir resposta e valor correto.
+ * 3. ADC Sanity: Lê as 30 tensões. Se encontrar algo absurdo (< 1V ou > 4.5V), assume cabo partido.
+ * 4. NFAULT Sanity: Garante que o pino físico de hardware alarm não disparou durante o arranque.
+ * Se passar tudo, levanta a flag `post_passed = true`.
+ */
 BMS_Status_t BMS_PowerOnSelfTest(BMS_Handle_t *hbms)
 {
     BMS_Status_t status;

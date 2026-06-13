@@ -13,9 +13,13 @@
  */
 
 #include "bms_master_comm.h"
-#include <stdio.h>     /* snprintf */
+#include <stdio.h>     
 #include <string.h>
 
+
+/* =========================================================================
+ * API PÚBLICA
+ * ========================================================================= */
 void BMS_MasterComm_Init(BMS_MasterComm_t *hcomm, UART_HandleTypeDef *huart2)
 {
     if ((hcomm == NULL) || (huart2 == NULL)) { return; }
