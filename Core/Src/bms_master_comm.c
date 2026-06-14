@@ -59,9 +59,12 @@ void BMS_MasterComm_Init(BMS_MasterComm_t *hcomm, UART_HandleTypeDef *huart2)
  * TX bloqueante a 115200 (frame curto, sem DMA). É chamada a 1 Hz e por evento
  * (quando a decisão de contactor ou o BMS_OK mudam — ver main_bms_app.c).
  *
- * NOTA de parsing: o campo 'ctor' é a DECISÃO lógica interna; o campo
- * 'rly[bms=..]' é o estado FÍSICO real do BMS_relay (0 = latch aberto por falha).
- * Podem divergir (ex.: BALANCING) — é esperado.
+ * NOTA de parsing: o campo 'ctor' é a DECISÃO lógica do BMS destinada ao
+ * inversor por CAN (a implementar) — não comanda o contactor principal aqui.
+ * Em CHARGING é sempre 'OPEN' (separação total tração/carga). O campo
+ * 'rly[bms=..]' é o estado FÍSICO real do BMS_relay de segurança (0 = latch
+ * aberto por falha ou estado inactivo) e pode estar a 1 mesmo durante o
+ * carregamento (o relé de segurança não é o contactor principal).
  */
 void BMS_MasterComm_PrintDebug(BMS_MasterComm_t *hcomm, BMS_Handle_t *hbms)
 {

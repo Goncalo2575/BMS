@@ -10,6 +10,14 @@
  *  ⚠ ARQUITECTURA (v3.3): isto SUPERSEDE a nota "decide e reporta, sem actuação"
  *    da v3.2. Este MCU é agora o actuador dos relés. Actualizar o FMEA/FTA.
  *
+ *  ⚠ NENHUM destes pinos é o CONTACTOR PRINCIPAL de tração (AIR). O contactor
+ *    principal é comandado pelo INVERSOR, via um sinal CAN que este MCU enviará
+ *    (a implementar). Aqui actuam-se apenas RELÉS auxiliares/de segurança:
+ *      PC0 pré-carga · PC1 charge (carregador) · PC2 DESCARGA/BLEED do bus ·
+ *      PC4 BMS_relay (loop de shutdown) · PA6 BMS_charge.
+ *    A variável contactor_closed (no handle do BMS) é a DECISÃO lógica destinada
+ *    ao inversor por CAN — não comanda nenhum pino deste MCU.
+ *
  *  ── ESTADOS (regulamento FS/TS) ─────────────────────────────────────────
  *    SAFE      : verde intermitente 1 Hz   (TSMS aberto, relés todos fechados)
  *    ENGAGED   : verde contínuo            (TSMS fechado -> pré-carga/condução)

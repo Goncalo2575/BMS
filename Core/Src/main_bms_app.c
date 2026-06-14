@@ -48,17 +48,20 @@ extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
  * ========================================================================= */
 
 /**
- * @brief  Decisão LÓGICA de contactor (gating de SoC/telemetria)
+ * @brief  Decisão LÓGICA de contactor (sinal p/ inversor via CAN; gating de SoC)
  *
  * Para que serve: mantém a variável de decisão contactor_closed coerente com o
- * estado do BMS. NÃO acciona pinos — a actuação física é do módulo de relés
- * (BMS_Relays_Task). Esta decisão serve para (a) gating do cálculo de SoC (só
- * em relaxação, contactor aberto) e (b) telemetria/reporte por evento.
+ * estado do BMS. NÃO acciona pinos — o contactor principal (AIR) é atracado
+ * pelo INVERSOR ao receber esta decisão por CAN (a implementar). Serve ainda
+ * para (a) gating do cálculo de SoC e (b) telemetria/reporte por evento.
  *
  * Como funciona: se houver NFAULT pendente sai logo (a ISR já decidiu abrir).
- * Caso contrário, fecha (logicamente) só em MONITORING sem falhas — passando
- * pelas barreiras internas de BMS_ContactorClose — e abre em qualquer outro
- * estado.
+ * Caso contrário, decide "fechar" em operação normal (MONITORING ou BALANCING,
+ * sem falhas) E desde que NÃO esteja a carregar — passando pelas barreiras de
+ * BMS_ContactorClose — e "abrir" em qualquer outro caso (incluindo CHARGING).
+ * BALANCING conta como normal (HV ligada). Em CHARGING a decisão é sempre
+ * "abrir": separação total tração/carga (D.5.3.7) — o AIR nunca é comandado
+ * fechado a carregar.
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
@@ -67,8 +70,12 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
         return;
     }
 
-    if (hbms->state == BMS_STATE_MONITORING &&
-        hbms->fault_flags == BMS_FAULT_NONE)
+    bool charging = (BMS_Relays_GetState() == BMS_RLY_CHARGING);
+
+    if (!charging &&
+        ((hbms->state == BMS_STATE_MONITORING) ||
+         (hbms->state == BMS_STATE_BALANCING)) &&
+        (hbms->fault_flags == BMS_FAULT_NONE))
     {
         if (!hbms->contactor_closed)
         {
@@ -79,7 +86,7 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
     {
         if (hbms->contactor_closed)
         {
-            BMS_ContactorOpen(hbms);
+            BMS_ContactorOpen(hbms);    /* inclui CHARGING → AIR inibido */
         }
     }
 }

@@ -15,6 +15,7 @@
  */
 
 #include "bq796xx_bms.h"
+#include "bms_relays.h"   /* BMS_Relays_GetState(): bloquear contactor/SoC em CHARGING */
 
 /* =========================================================================
  * SECÇÃO 4: LEITURA DE TENSÕES DAS CÉLULAS
@@ -571,8 +572,13 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
  *   • Esta camada (bq796xx_bms_monitor.c) CALCULA as decisões LÓGICAS de
  *     segurança e guarda-as no handle: contactor_closed, bms_ok, precharge_ready.
  *   • O módulo bms_relays.c (mesmo MCU) CONSOME essas decisões + a tensão do
- *     bus/pack e ACCIONA fisicamente os relés (PC0/PC1/PC2/PC4/PA6) e o LED
- *     cluster, com a máquina SAFE/ENGAGED/CHARGING/NOT_SAFE.
+ *     bus/pack e ACCIONA fisicamente os RELÉS auxiliares/de segurança
+ *     (PC0 pré-carga, PC1 charge, PC2 descarga/bleed, PC4 BMS_relay, PA6
+ *     BMS_charge) e o LED cluster, com a máquina SAFE/ENGAGED/CHARGING/NOT_SAFE.
+ *   • O CONTACTOR PRINCIPAL de tração (AIR) NÃO é actuado por este MCU: é
+ *     comandado pelo INVERSOR, com base num sinal CAN que este MCU enviará
+ *     (a implementar). contactor_closed é precisamente essa DECISÃO lógica
+ *     destinada ao inversor — não comanda nenhum pino aqui.
  *
  * RISCOS RESIDUAIS QUE TÊM DE SER TRATADOS NA ANÁLISE DE SEGURANÇA:
  *
@@ -602,13 +608,15 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
  * ========================================================================= */
 
 /**
- * @brief  Regista a DECISÃO de abrir o contactor (actuação física em bms_relays)
+ * @brief  Regista a DECISÃO de abrir o contactor (sinal lógico p/ inversor via CAN)
  *
- *  Esta camada não comanda o pino do relé. Aqui apenas:
+ *  Esta camada não comanda pinos. Aqui apenas:
  *   - pára o balanceamento (evita dissipar com o pack a ser isolado);
- *   - regista a decisão lógica contactor_closed=false.
- *  A abertura física do BMS_relay é feita por bms_relays.c quando deteta
- *  bms_ok=false / estado de falha.
+ *   - regista a decisão lógica contactor_closed=false (destinada ao inversor
+ *     por CAN — a implementar).
+ *  A abertura física dos RELÉS de segurança (BMS_relay) é feita por bms_relays.c
+ *  quando deteta bms_ok=false / estado de falha; o contactor principal (AIR)
+ *  é aberto pelo inversor ao receber esta decisão.
  */
 void BMS_ContactorOpen(BMS_Handle_t *hbms)
 {
@@ -620,16 +628,18 @@ void BMS_ContactorOpen(BMS_Handle_t *hbms)
 }
 
 /**
- * @brief  Regista a DECISÃO de fechar o contactor (actuação física em bms_relays)
+ * @brief  Regista a DECISÃO de fechar o contactor (sinal lógico p/ inversor via CAN)
  *
  *  PRÉ-CONDIÇÕES DE SEGURANÇA (todas têm de ser verdadeiras):
  *   [1] nfault_pending == 0   — evento de hardware NÃO processado (BARREIRA CRÍTICA)
  *   [2] fault_flags == 0      — sem falhas mapeadas pelo software
- *   [3] state == MONITORING   — máquina de estados em operação normal
+ *   [3] state == MONITORING ou BALANCING — operação normal (HV ligada)
  *   [4] min_cell_mv >= CELL_UV_MV && max_cell_mv <= CELL_OV_MV — tensões OK
+ *   [5] NÃO está em CHARGING   — separação total tração/carga (D.5.3.7): o AIR
+ *                                não pode ser comandado fechado a carregar.
  *
  *  Estas barreiras garantem que a DECISÃO nunca é "fechar" sobre uma condição
- *  insegura, antes de bms_relays a transformar em actuação física.
+ *  insegura. O contactor principal é depois atracado pelo inversor (via CAN).
  */
 void BMS_ContactorClose(BMS_Handle_t *hbms)
 {
@@ -643,14 +653,24 @@ void BMS_ContactorClose(BMS_Handle_t *hbms)
     {
         return;
     }
-    /* BARREIRA 3: máquina de estados em operação normal */
-    if (hbms->state != BMS_STATE_MONITORING)
+    /* BARREIRA 3: máquina de estados em operação normal (MONITORING ou
+     * BALANCING — o balanceamento é operação normal com HV ligada; tratá-lo
+     * como "abrir" fazia a decisão lógica divergir do estado real dos relés). */
+    if ((hbms->state != BMS_STATE_MONITORING) &&
+        (hbms->state != BMS_STATE_BALANCING))
     {
         return;
     }
     /* BARREIRA 4: tensões celulares dentro dos limites operacionais */
     if ((hbms->min_cell_mv < CELL_UV_MV) ||
         (hbms->max_cell_mv > CELL_OV_MV))
+    {
+        return;
+    }
+    /* BARREIRA 5: carregador ligado → separação total tração/carga.
+     * O circuito de tração tem de estar isolado e a 0 V durante TODO o
+     * carregamento; nunca comandar o AIR fechado nesta condição. */
+    if (BMS_Relays_GetState() == BMS_RLY_CHARGING)
     {
         return;
     }
@@ -744,8 +764,10 @@ BMS_Status_t BMS_Task_100ms(BMS_Handle_t *hbms)
     /* --- Filtro IIR (APÓS protecções — só telemetria/display/balanceamento) --- */
     BMS_ApplyVoltageFilter(hbms);
 
-    /* --- SoC (apenas em relaxação: contactor aberto → I≈0) --- */
-    if (!hbms->contactor_closed)
+    /* --- SoC (apenas em relaxação verdadeira: contactor aberto, sem bleed de
+     *     balanceamento E sem carregamento — qualquer corrente falseia a OCV) --- */
+    if (!hbms->contactor_closed && !hbms->is_balancing &&
+        (BMS_Relays_GetState() != BMS_RLY_CHARGING))
     {
         if ((hbms->min_cell_mv > 0U) && (hbms->max_cell_mv > 0U))
         {
