@@ -3,14 +3,15 @@
  * @brief   BMS - Módulo de Monitorização, Protecções e Tratamento de Falhas
  *          Leitura de tensões, temperaturas, gestão de faults e recuperação de anel
  *
- *  ARQUITECTURA CENTRALIZADA:
- *  Este STM32F446RET6 (placa Master) é o único microcontrolador que governa
- *  o pack. Centraliza a máquina de estados do BMS, a interface com o IMD
- *  (Insulation Monitoring Device) e a transmissão de telemetria (CAN/UART).
- *  Este MCU DECIDE (abrir/fechar contactor, BMS_OK, PRECHARGE_OK) e REPORTA;
- *  não acciona pinos de contactor/interlock (ver nota de segurança abaixo).
+ *  ARQUITECTURA (v3.3 — ACTUALIZADA):
+ *  Este STM32F446RET6 é o único microcontrolador que governa o pack. Centraliza
+ *  a máquina de estados do BMS, a interface com o IMD (Insulation Monitoring
+ *  Device) e a telemetria (USART2). Esta camada DECIDE (abrir/fechar contactor,
+ *  BMS_OK, PRECHARGE_OK) — decisões LÓGICAS guardadas no handle. A ACTUAÇÃO
+ *  FÍSICA dos relés/contactores e do LED cluster é feita pelo módulo
+ *  bms_relays.c, que corre NESTE MESMO MCU (ver Secção 9 e bms_relays.h).
  *
- * @version 3.2.0
+ * @version 3.3.0
  */
 
 #include "bq796xx_bms.h"
@@ -21,6 +22,9 @@
 
 /**
  * @brief  Converte os dois bytes raw do ADC para tensão em mV
+ *
+ * Para que serve: tradutor base de toda a leitura de tensão. Os BQ79616
+ * devolvem 16 bits por célula; este helper aplica a resolução do ADC.
  *         Resolução BQ79616: LSB = 190.73 µV → V_mV = (raw * 1907) / 10000
  */
 static inline uint16_t BMS_RawToMillivolts(uint8_t hi_byte, uint8_t lo_byte)
@@ -31,6 +35,10 @@ static inline uint16_t BMS_RawToMillivolts(uint8_t hi_byte, uint8_t lo_byte)
 
 /**
  * @brief  Lê as tensões de todas as células de um slave via Single Device Read
+ *
+ * Para que serve: obtém as 15 tensões celulares de UM slave e mapeia-as para o
+ * array lógico (Cell 1..15). Os registos VCELL vêm em ordem descendente, daí o
+ * mapeamento invertido.
  *         Endereço VCELL15_HI=0x056A; registos em ordem DESCENDENTE → mapeamento invertido.
  */
 static BMS_Status_t BMS_ReadSlaveVoltages(BMS_Handle_t *hbms, uint8_t slave_idx)
@@ -62,11 +70,16 @@ static BMS_Status_t BMS_ReadSlaveVoltages(BMS_Handle_t *hbms, uint8_t slave_idx)
 
 /**
  * @brief  Lê tensões de todos os slaves e calcula métricas globais
+ *
+ * Para que serve: ponto único de leitura de tensões do pack. Percorre os 2
+ * slaves, soma a tensão total (pack_voltage_mv), e calcula min/max/delta para
+ * protecções, balanceamento e telemetria. Em falha de comunicação de um slave,
+ * marca BMS_FAULT_COMM, zera as células desse slave e continua (não aborta).
  */
 BMS_Status_t BMS_ReadAllCellVoltages(BMS_Handle_t *hbms)
 {
     BMS_Status_t status;
-    uint32_t pack_sum  = 0UL;  /* uint32 obrigatório: 30S × 3600 mV > UINT16_MAX */
+    uint32_t pack_sum  = 0UL;  /* uint32 obrigatório: 30S × 4250 mV > UINT16_MAX */
     uint16_t min_mv    = 0xFFFFU;
     uint16_t max_mv    = 0U;
 
@@ -135,6 +148,11 @@ static const NTC_Point_t g_ntc_table[BMS_NTC_TABLE_SIZE] =
 
 /**
  * @brief  Converte medições ratiométricas GPIO/TSREF para temperatura em °C
+ *
+ * Para que serve: traduz a leitura do NTC (ratiométrica face ao TSREF) para °C
+ * por interpolação na tabela. Inclui uma barreira de segurança: se o rácio for
+ * ≈1.0 (NTC desconectado/cabo partido) força OT (127°C) em vez de reportar frio
+ * falso, garantindo que um sensor partido leva à abertura do contactor.
  */
 static int16_t BMS_RawToTemperature_Ratiometric(uint16_t gpio_raw,
                                                   uint16_t tsref_raw)
@@ -191,6 +209,10 @@ static int16_t BMS_RawToTemperature_Ratiometric(uint16_t gpio_raw,
 
 /**
  * @brief  Lê temperaturas de 3 NTCs por slave + tensão HV do barramento
+ *
+ * Para que serve: num único Single Read por slave (bloco GPIO1-4 + TSREF), obtém
+ * as 3 temperaturas NTC e regista o máximo global (max_temp_c) para protecção
+ * térmica. O GPIO4 (sensor HV) é lido à parte por BMS_ReadInverterVoltage.
  */
 BMS_Status_t BMS_ReadAllTemperatures(BMS_Handle_t *hbms)
 {
@@ -226,6 +248,14 @@ BMS_Status_t BMS_ReadAllTemperatures(BMS_Handle_t *hbms)
 
 /**
  * @brief  Lê a tensão do barramento HV via GPIO4 do Slave 1
+ *
+ * Para que serve: mede a tensão do barramento de alta tensão (após o divisor
+ * resistivo externo) para a lógica de pré-carga. O resultado (inverter_voltage_mv)
+ * é consumido por bms_relays.c (limiar dinâmico de 90% do pack) e gera o interlock
+ * lógico precharge_ready.
+ *
+ * BUG-FIX (v3.3): atenuação aplicada em ponto-fixo (NUM/DEN = 2711/100 = 27.11).
+ * O inteiro anterior (27) introduzia ~0.4% de erro por defeito na tensão do bus.
  */
 BMS_Status_t BMS_ReadInverterVoltage(BMS_Handle_t *hbms)
 {
@@ -238,7 +268,10 @@ BMS_Status_t BMS_ReadInverterVoltage(BMS_Handle_t *hbms)
 
     uint16_t raw = ((uint16_t)buf[0] << 8U) | (uint16_t)buf[1];
     uint32_t vadc_mv = (uint32_t)(((uint32_t)raw * 1907UL) / 10000UL);
-    hbms->inverter_voltage_mv = vadc_mv * (uint32_t)HV_BUS_ATTENUATION_RATIO;
+
+    /* Ponto-fixo 27.11: V_bus = V_adc × 2711 / 100 (sem overflow em uint32). */
+    hbms->inverter_voltage_mv = (vadc_mv * (uint32_t)HV_BUS_ATTENUATION_NUM)
+                              / (uint32_t)HV_BUS_ATTENUATION_DEN;
 
     hbms->precharge_ready =
         (hbms->inverter_voltage_mv >= PRECHARGE_THRESHOLD_MV);
@@ -252,6 +285,11 @@ BMS_Status_t BMS_ReadInverterVoltage(BMS_Handle_t *hbms)
 
 /**
  * @brief  Verifica limites de tensão e temperatura por software
+ *
+ * Para que serve: segunda barreira de protecção (a primeira são os comparadores
+ * de hardware OV/UV dos BQ79616 via NFAULT). Percorre todas as células e NTCs;
+ * se alguma viola OV/UV/OT, marca as flags (latched-by-design ASIL-D) e dispara
+ * BMS_EmergencyShutdown (decisão de abrir + bms_ok=false), passando a FAULT.
  */
 BMS_Status_t BMS_CheckProtections(BMS_Handle_t *hbms)
 {
@@ -329,12 +367,14 @@ BMS_Status_t BMS_CheckProtections(BMS_Handle_t *hbms)
  * @brief  Callback de interrupção NFAULT (EXTI8/PA8, flanco descendente)
  *         Chamada por HAL_GPIO_EXTI_Callback (em bq796xx_bms.c).
  *
- *  ARQUITECTURA CENTRALIZADA — ACTUAÇÃO DELEGADA:
- *  Este MCU NÃO abre fisicamente o contactor. Aqui regista-se, com latência
- *  mínima, a DECISÃO de abrir (contactor_closed=false) e o interlock lógico
- *  (bms_ok=false). A propagação ao estágio de potência é feita pelo reporte
- *  por evento no super-loop (ver main_bms_app.c) e/ou telemetria CAN/UART.
- *  (Ver a NOTA DE SEGURANÇA na Secção 9 sobre a abertura do contactor.)
+ * Para que serve: regista, com latência mínima, a DECISÃO de abrir o contactor
+ * quando o hardware da bateria sinaliza falha crítica (OV/OT/...) pelo NFAULT.
+ *
+ *  ACTUAÇÃO (v3.3): esta ISR não acciona o pino do contactor; marca
+ *  contactor_closed=false e bms_ok=false e levanta nfault_pending. A abertura
+ *  FÍSICA do BMS_relay é feita logo a seguir no super-loop: após
+ *  BMS_ProcessFaults corre BMS_Relays_Task, que abre o relé (latch). Ver a NOTA
+ *  DE SEGURANÇA na Secção 9.
  */
 void BMS_NFAULT_IRQHandler(BMS_Handle_t *hbms)
 {
@@ -350,6 +390,11 @@ void BMS_NFAULT_IRQHandler(BMS_Handle_t *hbms)
 
 /**
  * @brief  Lê e interpreta os registos FAULT_SUMMARY de todos os dispositivos
+ *
+ * Para que serve: chamada quando há NFAULT pendente, faz o diagnóstico completo:
+ * lê o FAULT_SUMMARY da bridge (ring break/heartbeat) e dos slaves (OV/UV/COMM),
+ * deteta open-wire (VCOW) e decide a acção — shutdown de emergência em falhas
+ * críticas, ou tentativa de recuperação de anel em ring break.
  */
 BMS_Status_t BMS_ProcessFaults(BMS_Handle_t *hbms)
 {
@@ -456,6 +501,15 @@ BMS_Status_t BMS_ProcessFaults(BMS_Handle_t *hbms)
  * SECÇÃO 8: RECUPERAÇÃO DE ANEL (RING BREAK RECOVERY)
  * ========================================================================= */
 
+/**
+ * @brief  Recupera a comunicação após rotura do anel, comutando para o caminho reverso (DIR1)
+ *
+ * Para que serve: tolerância a falha do cabo de comunicação (topologia em anel).
+ * Se o caminho principal (DIR0) partir, comuta a bridge para DIR1 e testa se os
+ * slaves respondem pelos endereços reversos. Se sim, troca os endereços lógicos
+ * (passa a operar em modo degradado mas funcional) e volta a MONITORING. Se nem
+ * o caminho reverso responder, marca COMM e fica em FAULT.
+ */
 BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
 {
     BMS_Status_t status;
@@ -484,7 +538,7 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
     {
         hbms->ring_using_reverse = true;
         hbms->fault_flags &= ~BMS_FAULT_RING_BREAK;
-        /* Modo degradado (anel físico partido) comunicado ao master por
+        /* Modo degradado (anel físico partido) comunicado ao registador por
          * ring_intact=false na telemetria — NÃO por fault_flag. */
 
         for (uint8_t s = 0U; s < BMS_NUM_SLAVES; s++)
@@ -505,56 +559,56 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
 }
 
 /* =========================================================================
- * SECÇÃO 9: DECISÃO DE CONTACTOR E INTERLOCKS (LÓGICA — SEM GPIO)
+ * SECÇÃO 9: DECISÃO DE CONTACTOR E INTERLOCKS (LÓGICA — ACTUAÇÃO EM bms_relays)
  * =========================================================================
  * ⚠⚠⚠  NOTA DE SEGURANÇA — ABERTURA DO CONTACTOR (ISO 26262 / ASIL-D)  ⚠⚠⚠
  * -------------------------------------------------------------------------
- * ARQUITECTURA CENTRALIZADA: este STM32F446RET6 (placa Master) é a ÚNICA
- * autoridade de decisão de segurança do pack. Concentra a máquina de estados
- * do BMS, a interface com o IMD (Insulation Monitoring Device) e a telemetria
- * (CAN/UART). Não existe um segundo MCU de supervisão.
+ * ARQUITECTURA (v3.3): este STM32F446RET6 é a ÚNICA autoridade de decisão de
+ * segurança do pack E TAMBÉM O ACTUADOR. Concentra a máquina de estados do BMS,
+ * a interface com o IMD e a telemetria. Não existe um segundo MCU de supervisão.
  *
- * PROBLEMA DE SEGURANÇA (a constar do FMEA/FTA do projecto):
- * Este MCU DECIDE abrir o contactor (hbms->contactor_closed = false) mas NÃO
- * acciona fisicamente o pino do contactor — a actuação física é delegada no
- * estágio de potência. Daqui resultam três riscos que têm de ser tratados:
+ * SEPARAÇÃO DE RESPONSABILIDADES (a constar do FMEA/FTA do projecto):
+ *   • Esta camada (bq796xx_bms_monitor.c) CALCULA as decisões LÓGICAS de
+ *     segurança e guarda-as no handle: contactor_closed, bms_ok, precharge_ready.
+ *   • O módulo bms_relays.c (mesmo MCU) CONSOME essas decisões + a tensão do
+ *     bus/pack e ACCIONA fisicamente os relés (PC0/PC1/PC2/PC4/PA6) e o LED
+ *     cluster, com a máquina SAFE/ENGAGED/CHARGING/NOT_SAFE.
+ *
+ * RISCOS RESIDUAIS QUE TÊM DE SER TRATADOS NA ANÁLISE DE SEGURANÇA:
  *
  *   1) LATÊNCIA vs FTTI
- *      A decisão "ABRIR" tem de chegar ao estágio de actuação dentro do
- *      Fault Tolerant Time Interval. Se a decisão só viajasse na telemetria
- *      periódica (1 Hz), a latência (até ~1 s) excederia o FTTI de um evento
- *      OV/OT e o pack permaneceria ligado sobre a falha → risco de thermal
- *      runaway. MITIGAÇÃO IMPLEMENTADA: a decisão é também emitida POR EVENTO
- *      (reporte imediato no super-loop quando contactor_closed/bms_ok mudam).
+ *      A decisão "ABRIR" tem de ser actuada dentro do Fault Tolerant Time
+ *      Interval. MITIGAÇÃO: o NFAULT é processado FORA da cadência de 100 ms
+ *      (imediato no super-loop) e seguido logo de BMS_Relays_Task, que abre o
+ *      BMS_relay no mesmo ciclo. A pré-carga longa (750 ms) é não-bloqueante
+ *      para não comprometer o refresh do IWDG.
  *
- *   2) PONTO ÚNICO DE FALHA (SPOF)
- *      Numa arquitectura centralizada, se o canal de comunicação da decisão
- *      falhar (link partido, MCU em hang antes do IWDG resetar), não há
- *      caminho redundante para abrir o contactor. BOA PRÁTICA ASIL-D: uma
- *      linha digital de interlock de HARDWARE dedicada ("BMS_OK" directa ao
- *      estágio de potência), independente da telemetria e em lógica
- *      "fail-safe" (ausência de sinal = contactor aberto). No estado actual
- *      este interlock é apenas LÓGICO (hbms->bms_ok) — recomenda-se promovê-lo
- *      a pino físico de hardware se o estágio de potência o suportar.
+ *   2) PONTO ÚNICO DE FALHA (SPOF) — MCU único
+ *      Sendo o mesmo MCU a decidir e a actuar, um hang do CPU deixaria os relés
+ *      no último estado. MITIGAÇÕES: (a) IWDG ~500 ms reseta o MCU; o
+ *      BMS_Relays_Init repõe o estado seguro de arranque (BMS_relay/BMS_charge
+ *      fechados, contactores abertos, LEDs apagados) — confirmar que este
+ *      estado de arranque é o adequado ao veículo; (b) recomenda-se manter o
+ *      NFAULT da bridge ramificado por HARDWARE para um corte independente do
+ *      software, como defense-in-depth.
  *
- *   3) NFAULT (defense-in-depth de hardware)
- *      O sinal NFAULT da bridge (PA8) idealmente ramifica também para o
- *      estágio de actuação, para que a abertura física NÃO dependa do
- *      software deste MCU. Se NFAULT só entra neste MCU, a abertura depende
- *      do caminho ISR→reporte→actuação — um único fio de software.
+ *   3) FAIL-SAFE DOS MONITORES
+ *      As entradas de monitorização (IMD/TSMS/ESDB/...) usam pull-down: a
+ *      ausência de sinal lê-se como "não activo" → tende a NOT_SAFE. Confirmar
+ *      a polaridade real do hardware contra esta convenção.
  *
- * ESTADO ACTUAL: este MCU reporta contactor_closed, bms_ok e precharge_ready
- * ao Master/estágio de potência (telemetria + reporte por evento). A abertura
- * física é da responsabilidade desse estágio. Esta limitação É uma decisão de
- * arquitectura e DEVE ser registada e justificada na análise de segurança.
+ * Esta arquitectura (MCU único decisor+actuador) É uma decisão de projecto e
+ * DEVE ser registada e justificada na análise de segurança (FMEA/FTA).
  * ========================================================================= */
 
 /**
- * @brief  Regista a DECISÃO de abrir o contactor (sem actuação física)
+ * @brief  Regista a DECISÃO de abrir o contactor (actuação física em bms_relays)
  *
- *  Este MCU não comanda o pino do contactor. Aqui apenas:
+ *  Esta camada não comanda o pino do relé. Aqui apenas:
  *   - pára o balanceamento (evita dissipar com o pack a ser isolado);
- *   - regista a decisão lógica contactor_closed=false (reportada ao master).
+ *   - regista a decisão lógica contactor_closed=false.
+ *  A abertura física do BMS_relay é feita por bms_relays.c quando deteta
+ *  bms_ok=false / estado de falha.
  */
 void BMS_ContactorOpen(BMS_Handle_t *hbms)
 {
@@ -562,11 +616,11 @@ void BMS_ContactorOpen(BMS_Handle_t *hbms)
     {
         (void)BMS_StopAllBalancing(hbms);
     }
-    hbms->contactor_closed = false;   /* DECISÃO: abrir (actuação no master) */
+    hbms->contactor_closed = false;   /* DECISÃO: abrir */
 }
 
 /**
- * @brief  Regista a DECISÃO de fechar o contactor (sem actuação física)
+ * @brief  Regista a DECISÃO de fechar o contactor (actuação física em bms_relays)
  *
  *  PRÉ-CONDIÇÕES DE SEGURANÇA (todas têm de ser verdadeiras):
  *   [1] nfault_pending == 0   — evento de hardware NÃO processado (BARREIRA CRÍTICA)
@@ -574,8 +628,8 @@ void BMS_ContactorOpen(BMS_Handle_t *hbms)
  *   [3] state == MONITORING   — máquina de estados em operação normal
  *   [4] min_cell_mv >= CELL_UV_MV && max_cell_mv <= CELL_OV_MV — tensões OK
  *
- *  Mesmo sem actuação física, estas barreiras garantem que a DECISÃO
- *  reportada ao master nunca é "fechar" sobre uma condição insegura.
+ *  Estas barreiras garantem que a DECISÃO nunca é "fechar" sobre uma condição
+ *  insegura, antes de bms_relays a transformar em actuação física.
  */
 void BMS_ContactorClose(BMS_Handle_t *hbms)
 {
@@ -601,22 +655,25 @@ void BMS_ContactorClose(BMS_Handle_t *hbms)
         return;
     }
 
-    /* Todas as barreiras ultrapassadas — DECISÃO: fechar (actuação no master) */
+    /* Todas as barreiras ultrapassadas — DECISÃO: fechar */
     hbms->contactor_closed = true;
 }
 
 /**
  * @brief  Shutdown de emergência - decisão de abrir + interlock NOK
  *         Chamado em condições críticas (OV, UV, OT, Ring fail total)
+ *
+ * Para que serve: ponto único de "desligar em segurança" por software. Espelha
+ * o comportamento da ISR NFAULT para faults que não têm comparador de hardware
+ * (OT, UV por ADC): regista a decisão de abrir, força bms_ok=false e passa a FAULT.
+ * A abertura física do BMS_relay segue em bms_relays.c.
  */
 void BMS_EmergencyShutdown(BMS_Handle_t *hbms)
 {
     /* Decisão de abrir (pára balanceamento + contactor_closed=false) */
     BMS_ContactorOpen(hbms);
 
-    /* Interlock lógico BMS_OK → NOK, reportado imediatamente ao master.
-     * Espelha o comportamento da ISR NFAULT para faults de software (OT/UV
-     * por ADC, que não têm comparador de hardware). */
+    /* Interlock lógico BMS_OK → NOK. */
     hbms->bms_ok = false;
 
     hbms->state = BMS_STATE_FAULT;
@@ -626,6 +683,19 @@ void BMS_EmergencyShutdown(BMS_Handle_t *hbms)
  * SECÇÃO 10: TAREFA CÍCLICA PRINCIPAL (100 ms)
  * ========================================================================= */
 
+/**
+ * @brief  Tarefa periódica de monitorização do BMS (cadência de 100 ms)
+ *
+ * Para que serve: é o "batimento cardíaco" da monitorização. Por ordem:
+ * 1. Processa NFAULT pendente (prioridade máxima); se ficar em FAULT, sai.
+ * 2. Salta a aquisição em estados sem ADC (FAULT/SHUTDOWN/SLEEP/UNINIT).
+ * 3. Lê tensões, temperaturas e tensão HV do barramento.
+ * 4. Corre as protecções sobre dados RAW (FTTI) — antes do filtro.
+ * 5. Aplica o filtro IIR (só telemetria/balanceamento), estima SoC (em
+ *    relaxação), corre o balanceamento passivo e actualiza os interlocks lógicos.
+ * Nota: a actuação dos relés/LED NÃO é feita aqui — é BMS_Relays_Task, chamada
+ * em todas as iterações do super-loop (ver main_bms_app.c).
+ */
 BMS_Status_t BMS_Task_100ms(BMS_Handle_t *hbms)
 {
     BMS_Status_t status = BMS_OK;
@@ -688,7 +758,7 @@ BMS_Status_t BMS_Task_100ms(BMS_Handle_t *hbms)
     /* --- Balanceamento celular passivo --- */
     (void)BMS_RunPassiveBalancing(hbms);
 
-    /* --- Actualizar interlocks lógicos (BMS_OK, PRECHARGE_OK) para o master --- */
+    /* --- Actualizar interlocks lógicos (BMS_OK, PRECHARGE_OK) --- */
     BMS_UpdateHardwareInterlocks(hbms);
 
     return BMS_OK;
@@ -698,6 +768,12 @@ BMS_Status_t BMS_Task_100ms(BMS_Handle_t *hbms)
  * SECÇÃO 11: UTILITÁRIOS DE DIAGNÓSTICO
  * ========================================================================= */
 
+/**
+ * @brief  Devolve o nome legível do estado do BMS (para telemetria/debug)
+ *
+ * Para que serve: traduz o enum BMS_State_t para texto, usado na linha de
+ * telemetria USART2 e nos prints de arranque.
+ */
 const char *BMS_GetStateString(BMS_State_t state)
 {
     switch (state)
@@ -715,6 +791,12 @@ const char *BMS_GetStateString(BMS_State_t state)
     }
 }
 
+/**
+ * @brief  Devolve o nome legível da falha de maior prioridade (para telemetria/debug)
+ *
+ * Para que serve: traduz o bitfield fault_flags para texto. Como podem coexistir
+ * várias falhas, devolve a de maior prioridade pela ordem de teste (OV→UV→OT→...).
+ */
 const char *BMS_GetFaultString(uint32_t fault_flags)
 {
     if (fault_flags == BMS_FAULT_NONE)    { return "NONE"; }
@@ -733,6 +815,13 @@ const char *BMS_GetFaultString(uint32_t fault_flags)
  * SECÇÃO: BALANCEAMENTO CELULAR PASSIVO
  * ========================================================================= */
 
+/**
+ * @brief  Programa a máscara de balanceamento de um slave (que células drenar)
+ *
+ * Para que serve: escreve o bitmask das células a balancear num slave. Cada bit
+ * a 1 liga a resistência de descarga (bleed) dessa célula. O bit 7 do byte alto
+ * fica a 0 (VC16 inactivo na config 15S).
+ */
 BMS_Status_t BMS_SetCellBalancing(BMS_Handle_t *hbms, uint8_t slave_addr,
                                    uint16_t cell_mask)
 {
@@ -742,6 +831,13 @@ BMS_Status_t BMS_SetCellBalancing(BMS_Handle_t *hbms, uint8_t slave_addr,
     return BMS_WriteSingleDevice(hbms, slave_addr, REG_CB_CELL1_CTRL, data, 2U);
 }
 
+/**
+ * @brief  Pára o balanceamento em todos os slaves
+ *
+ * Para que serve: desliga todas as resistências de bleed (escreve 0) em todos os
+ * slaves e limpa o estado is_balancing. Usado antes de dormir, em falha, ou
+ * quando o desequilíbrio já está dentro do limite.
+ */
 BMS_Status_t BMS_StopAllBalancing(BMS_Handle_t *hbms)
 {
     uint8_t zero[2U] = {0x00U, 0x00U};
@@ -758,6 +854,15 @@ BMS_Status_t BMS_StopAllBalancing(BMS_Handle_t *hbms)
     return final_status;
 }
 
+/**
+ * @brief  Executa um ciclo de balanceamento passivo (top-balancing)
+ *
+ * Para que serve: equaliza as células drenando as mais altas. Só corre em
+ * MONITORING/BALANCING, sem falhas e abaixo do aviso térmico. Selecciona as
+ * células acima de (min + histerese) e acima da tensão mínima de balanceamento,
+ * programa as máscaras e gere a transição de estado MONITORING↔BALANCING. Pára
+ * quando o delta desce abaixo do limiar.
+ */
 BMS_Status_t BMS_RunPassiveBalancing(BMS_Handle_t *hbms)
 {
     if ((hbms->state != BMS_STATE_MONITORING) &&
@@ -824,18 +929,17 @@ BMS_Status_t BMS_RunPassiveBalancing(BMS_Handle_t *hbms)
 }
 
 /* =========================================================================
- * SECÇÃO: INTERLOCKS LÓGICOS E COMUNICAÇÃO DE ESTADO AO MASTER
+ * SECÇÃO: INTERLOCKS LÓGICOS E COMUNICAÇÃO DE ESTADO
  * ========================================================================= */
 
 /**
- * @brief  Calcula os interlocks lógicos a reportar ao master (sem GPIO)
+ * @brief  Calcula os interlocks lógicos BMS_OK e PRECHARGE_OK
  *
  *  BMS_OK:       true só se fault_flags==0 E nfault_pending==0 E estado activo
- *  PRECHARGE_OK: true se tensão HV barramento >= PRECHARGE_THRESHOLD_MV
+ *  PRECHARGE_OK: calculado em BMS_ReadInverterVoltage (tensão HV ≥ limiar)
  *
- *  Estes valores são consumidos pela telemetria (CAN/UART) e pelo reporte por
- *  evento. Ver NOTA DE SEGURANÇA (Secção 9): num design ASIL-D robusto, BMS_OK
- *  deveria também existir como pino físico de hardware independente do software.
+ *  Estes valores são consumidos pela telemetria e pelo módulo bms_relays
+ *  (decide a actuação física). Ver NOTA DE SEGURANÇA (Secção 9).
  */
 void BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms)
 {
@@ -852,6 +956,14 @@ void BMS_UpdateHardwareInterlocks(BMS_Handle_t *hbms)
  * SECÇÃO: FILTRO DE TENSÃO (Média Móvel Exponencial — IIR)
  * ========================================================================= */
 
+/**
+ * @brief  Aplica o filtro IIR exponencial às tensões celulares
+ *
+ * Para que serve: suaviza o ruído das leituras para telemetria/display e para o
+ * balanceamento (NÃO para as protecções — essas correm sobre dados RAW, antes
+ * deste filtro). Na primeira passagem faz "seed" (filtrado = raw) para evitar
+ * arranque enviesado.
+ */
 void BMS_ApplyVoltageFilter(BMS_Handle_t *hbms)
 {
     for (uint8_t s = 0U; s < BMS_NUM_SLAVES; s++)
@@ -909,6 +1021,14 @@ static const SoC_Point_t g_soc_table[BMS_SOC_TABLE_SIZE] =
     { 4200U, 100U }    /* 4.20 V -> 100% (Totalmente Carregada) */
 };
 
+/**
+ * @brief  Estima o SoC (%) a partir da tensão média por célula (OCV lookup)
+ *
+ * Para que serve: converte a tensão média em circuito aberto numa percentagem de
+ * carga, por interpolação linear na tabela OCV. Só é fiável em relaxação
+ * (contactor aberto, corrente ≈ 0) — daí ser chamado nessa condição em
+ * BMS_Task_100ms. Faz clamp nos extremos da tabela.
+ */
 uint8_t BMS_EstimateSoC(uint16_t avg_cell_mv)
 {
     if (avg_cell_mv <= g_soc_table[0].mv)

@@ -7,8 +7,8 @@
  *  pré-carga, descarga, charge (carregador), BMS_relay e BMS_charge — e a
  *  conduzir o LED cluster a partir do estado de segurança.
  *
- *  ⚠ ARQUITECTURA: isto contraria a nota "decide e reporta, sem actuação" da
- *  v3.2.0. Actualizar o FMEA/FTA: este MCU é agora o actuador dos relés.
+ *  ⚠ ARQUITECTURA (v3.3): isto SUPERSEDE a nota "decide e reporta, sem actuação"
+ *    da v3.2. Este MCU é agora o actuador dos relés. Actualizar o FMEA/FTA.
  *
  *  ── ESTADOS (regulamento FS/TS) ─────────────────────────────────────────
  *    SAFE      : verde intermitente 1 Hz   (TSMS aberto, relés todos fechados)
@@ -17,14 +17,18 @@
  *    NOT_SAFE  : vermelho contínuo         (BMS/IMD/ESDB aberto) [prioridade]
  *  Fail-safe: na dúvida, NOT_SAFE / LEDs apagados (= Not Safe por regulamento).
  *
- *  ── MAPA DE PINOS (CONFIRMAR — ver tabela de conflitos na conversa) ──────
+ *  ── MAPA DE PINOS (CONFIRMAR polaridade real contra o esquema) ──────────
  *  SAÍDAS (relés, active-high: SET = relé fechado/energizado):
  *    PC0  pré-carga        PC1  charge (relé do carregador)
  *    PC2  descarga (ctr)   PC4  BMS_relay        PA6  BMS_charge
  *  SAÍDAS (LED):
- *    PA15 verde   PC11 vermelho   PC12 azul   (PA15=JTDI -> Debug SWD/SWO no CubeMX)
+ *    PA15 verde   PC11 vermelho   PC12 azul
+ *    (PA15 = JTDI; libertado quando CubeMX SYS Debug = "Trace Asynchronous SW",
+ *     que reserva PA13=SWDIO, PA14=SWCLK, PB3=SWO para o conector de programação)
  *  ENTRADAS (monitor, pull-down fail-safe, active-high: SET = activo/fechado):
  *    PB0  IMD status   PC8  TSMS   PC6  ESDB   PB14 ESDB charger   PB12 charger signal
+ *
+ * @version 3.3.0
  */
 
 #ifndef BMS_RELAYS_H

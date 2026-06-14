@@ -12,7 +12,7 @@
  *    - atraso de pré-carga (750 ms) NÃO-bloqueante (o IWDG ~500 ms proíbe
  *      HAL_Delay longos no super-loop)
  *
- * @version 3.2.0
+ * @version 3.3.0
  */
 
 #include "bms_relays.h"
@@ -59,6 +59,14 @@ static MonCh_t s_mon[MON_COUNT];
 /* =========================================================================
  * UTILITÁRIOS
  * ========================================================================= */
+
+/**
+ * @brief  Inicializa um canal de monitor (porta/pino + estado de arranque)
+ *
+ * Para que serve: regista o GPIO de cada entrada de segurança na tabela de
+ * debounce e arranca em "não activo" (stable=0), que é o estado fail-safe (com
+ * pull-down, a ausência de sinal lê-se como não activo → tende a NOT_SAFE).
+ */
 static void mon_seed(MonId_t id, GPIO_TypeDef *port, uint16_t pin)
 {
     s_mon[id].port     = port;
@@ -68,6 +76,14 @@ static void mon_seed(MonId_t id, GPIO_TypeDef *port, uint16_t pin)
     s_mon[id].t        = 0U;
 }
 
+/**
+ * @brief  Actualiza o estado estável de um monitor com debounce temporal
+ *
+ * Para que serve: filtra ruído/ressalto das entradas de segurança. Só promove
+ * uma nova leitura a "estável" se ela se mantiver inalterada durante
+ * BMS_RELAY_DEBOUNCE_MS (100 ms). Qualquer transição reinicia a contagem.
+ * Não-bloqueante: usa o tempo now_ms (HAL_GetTick) passado pela tarefa.
+ */
 static void mon_update(MonId_t id, uint32_t now_ms)
 {
     MonCh_t *d = &s_mon[id];
@@ -94,6 +110,19 @@ static void mon_update(MonId_t id, uint32_t now_ms)
 /* =========================================================================
  * INICIALIZAÇÃO
  * ========================================================================= */
+
+/**
+ * @brief  Configura GPIO da malha de relés/LED/monitores e estado seguro de arranque
+ *
+ * Para que serve: é o primeiro passo de segurança do arranque (corre ANTES do
+ * BMS_Init). Liga os clocks de GPIOA/B/C, configura os relés e LEDs como saída
+ * push-pull e os monitores como entrada com pull-down (fail-safe). Deixa o
+ * hardware num estado seguro conhecido: BMS_relay/BMS_charge FECHADOS, pré-carga/
+ * descarga/charge ABERTOS, LEDs apagados. Inicializa também a tabela de debounce.
+ *
+ * ⚠ Confirmar que este estado de arranque (BMS_relay fechado) é o adequado ao
+ *   veículo — ver NOTA DE SEGURANÇA (bq796xx_bms_monitor.c, Secção 9).
+ */
 void BMS_Relays_Init(void)
 {
     __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -155,6 +184,26 @@ void BMS_Relays_Init(void)
 /* =========================================================================
  * TAREFA PRINCIPAL
  * ========================================================================= */
+
+/**
+ * @brief  Tarefa de segurança não-bloqueante: monitores -> estado -> relés/LED
+ *
+ * Para que serve: é o coração da malha de segurança e da actuação física.
+ * Corre em TODAS as iterações do super-loop (não só a 100 ms) para o debounce,
+ * o blink do LED e a pré-carga temporizada serem fluidos. Por etapas:
+ *  1) amostra+debounce dos 5 monitores;
+ *  2) deriva BMS_OK do estado da BMS (fault_flags + nfault_pending);
+ *  3) lê tensões do bus/pack para a lógica de pré-carga/descarga;
+ *  4) relé do carregador segue o optoacoplador (charger);
+ *  5) BMS_relay + BMS_charge ABREM em falha e ficam em LATCH (sem reclose, salvo
+ *     BMS_RELAY_AUTO_RECLOSE);
+ *  6) calcula esdb_flag/tsms_flag (lógica idêntica ao ano passado);
+ *  7) auto-abertura de descarga/pré-carga por tensão do bus;
+ *  8) selecciona o estado SAFE/ENGAGED/CHARGING/NOT_SAFE (NOT_SAFE tem prioridade);
+ *  9) acções de ENTRADA de estado (descarga/bleed vs pré-carga);
+ * 10) pré-carga adiada do ENGAGED (750 ms, não-bloqueante);
+ * 11) conduz o LED cluster a partir do estado.
+ */
 void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
 {
     if (hbms == NULL) { return; }
@@ -321,11 +370,24 @@ void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
 /* =========================================================================
  * ACESSORES
  * ========================================================================= */
+
+/**
+ * @brief  Devolve o estado de segurança actual (enum)
+ *
+ * Para que serve: permite a outros módulos (ex.: aplicação) consultar o estado
+ * SAFE/ENGAGED/CHARGING/NOT_SAFE sem conhecer o estado interno do módulo.
+ */
 BMS_RelayState_t BMS_Relays_GetState(void)
 {
     return s_state;
 }
 
+/**
+ * @brief  Devolve o nome legível do estado de segurança (para telemetria/debug)
+ *
+ * Para que serve: traduz o enum de estado para texto, usado na linha de
+ * telemetria USART2 (campo "sfty=") e nos prints de arranque.
+ */
 const char *BMS_Relays_GetStateString(void)
 {
     switch (s_state)
@@ -338,6 +400,13 @@ const char *BMS_Relays_GetStateString(void)
     }
 }
 
+/**
+ * @brief  Preenche um snapshot dos monitores (debounced) + estado dos relés
+ *
+ * Para que serve: dá à telemetria (bms_master_comm) uma fotografia coerente dos
+ * 5 sinais de entrada já filtrados e do estado lógico de cada relé, sem expor o
+ * estado interno do módulo. bms_relay_closed = false indica latch aberto por falha.
+ */
 void BMS_Relays_GetMonitors(BMS_RelayMonitors_t *out)
 {
     if (out == NULL) { return; }

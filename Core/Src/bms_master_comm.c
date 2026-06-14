@@ -2,18 +2,20 @@
  * @file    bms_master_comm.c
  * @brief   BMS → Saída de DEBUG/Telemetria (USART2, PA2/PA3) — TX-only
  *
- *  Arquitectura CENTRALIZADA: este STM32F446 (Master) reporta o estado e as
- *  DECISÕES de segurança ao estágio de potência / registador via uma linha de
- *  texto legível a 1 Hz (+ reporte por evento).
+ *  Arquitectura CENTRALIZADA (v3.3): este STM32F446 decide, ACTUA os relés
+ *  (via bms_relays) e reporta o estado a um terminal/registador por uma linha
+ *  de texto legível a 1 Hz (+ reporte por evento).
  *
- *  A linha inclui agora o estado da máquina de segurança (SAFE/ENGAGED/
- *  CHARGING/NOT_SAFE) e os sinais dos monitores (IMD/TSMS/ESDB/ESDB_charger/
- *  charger) e o estado dos relés, vindos do módulo bms_relays.
+ *  A linha inclui o estado do BMS, as decisões lógicas (contactor/BMS_OK/
+ *  precharge) e, no fim, o estado da máquina de segurança (SAFE/ENGAGED/
+ *  CHARGING/NOT_SAFE), os sinais dos monitores (IMD/TSMS/ESDB/ESDB_charger/
+ *  charger) e o estado real dos relés — vindos do módulo bms_relays.
  *
- *  ⚠ Esta linha periódica NÃO é o canal de segurança de baixa latência:
- *  a decisão crítica de abrir o contactor é também emitida POR EVENTO no
- *  super-loop (ver main_bms_app.c). Ver a NOTA DE SEGURANÇA em
- *  bq796xx_bms_monitor.c (Secção 9).
+ *  ⚠ Esta linha periódica NÃO é o canal de segurança de baixa latência: a
+ *  abertura crítica dos relés é feita localmente por bms_relays.c. Ver a NOTA
+ *  DE SEGURANÇA em bq796xx_bms_monitor.c (Secção 9).
+ *
+ * @version 3.3.0
  */
 
 #include "bms_master_comm.h"
@@ -25,6 +27,14 @@
 /* =========================================================================
  * API PÚBLICA
  * ========================================================================= */
+
+/**
+ * @brief  Inicializa a saída de debug/telemetria (USART2)
+ *
+ * Para que serve: guarda o handle do USART2 e zera o contador de linhas. NÃO
+ * arma qualquer recepção (TX-only) — o PA3/RX fica livre. Chamar uma vez após
+ * MX_USART2_UART_Init().
+ */
 void BMS_MasterComm_Init(BMS_MasterComm_t *hcomm, UART_HandleTypeDef *huart2)
 {
     if ((hcomm == NULL) || (huart2 == NULL)) { return; }
@@ -34,6 +44,25 @@ void BMS_MasterComm_Init(BMS_MasterComm_t *hcomm, UART_HandleTypeDef *huart2)
     /* TX-only: nada de HAL_UART_Receive_IT. PA3 (RX) fica livre. */
 }
 
+/**
+ * @brief  Compõe e envia uma linha única de telemetria/debug pelo USART2
+ *
+ * Para que serve: dá visibilidade externa do sistema num formato legível por
+ * humanos e fácil de fazer parse por uma máquina. A linha leva, por esta ordem:
+ *   - estado do BMS, falha activa, tensões pack/min/max/delta, Tmax, SoC, HV;
+ *   - decisões lógicas: ring, contactor (decisão), BMS_OK, PRECHARGE_OK;
+ *   - contadores de erro (comm/crc);
+ *   - (NO FIM, para não partir parsers antigos) estado de segurança, sinais dos
+ *     monitores e estado real dos relés, obtidos via BMS_Relays_GetMonitors().
+ *
+ * Como funciona: snprintf para um buffer de 384 B (trunca em segurança), depois
+ * TX bloqueante a 115200 (frame curto, sem DMA). É chamada a 1 Hz e por evento
+ * (quando a decisão de contactor ou o BMS_OK mudam — ver main_bms_app.c).
+ *
+ * NOTA de parsing: o campo 'ctor' é a DECISÃO lógica interna; o campo
+ * 'rly[bms=..]' é o estado FÍSICO real do BMS_relay (0 = latch aberto por falha).
+ * Podem divergir (ex.: BALANCING) — é esperado.
+ */
 void BMS_MasterComm_PrintDebug(BMS_MasterComm_t *hcomm, BMS_Handle_t *hbms)
 {
     if ((hcomm == NULL) || (hbms == NULL) || (hcomm->huart == NULL)) { return; }

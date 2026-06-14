@@ -16,10 +16,12 @@
  *    LED:    PA15 verde  PC11 vermelho  PC12 azul
  *    Monitor:PB0 IMD  PC8 TSMS  PC6 ESDB  PB14 ESDB_chg  PB12 charger_sig
  *
- *  CONFIG CubeMX (84 MHz): ver bms_relays.h e a nota abaixo. SYS Debug=SWD
- *  (liberta PA15). IWDG ~500 ms (a pré-carga do ENGAGED é não-bloqueante).
+ *  CONFIG CubeMX (84 MHz): ver bms_relays.h e a nota abaixo.
+ *  SYS Debug = Trace Asynchronous SW (reserva PA13=SWDIO, PA14=SWCLK, PB3=SWO;
+ *  liberta PA15/JTDI para o LED verde). IWDG ~500 ms (a pré-carga do ENGAGED
+ *  é não-bloqueante).
  *
- * @version 3.2.0
+ * @version 3.3.0
  */
 
 #include "bq796xx_bms.h"
@@ -46,9 +48,17 @@ extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
  * ========================================================================= */
 
 /**
- * @brief  Lógica de controlo do contactor (decisão LÓGICA interna).
- *  Mantida para gating do SoC (relaxação com contactor aberto) e telemetria.
- *  A ACTUAÇÃO física é feita por BMS_Relays_Task (módulo de relés).
+ * @brief  Decisão LÓGICA de contactor (gating de SoC/telemetria)
+ *
+ * Para que serve: mantém a variável de decisão contactor_closed coerente com o
+ * estado do BMS. NÃO acciona pinos — a actuação física é do módulo de relés
+ * (BMS_Relays_Task). Esta decisão serve para (a) gating do cálculo de SoC (só
+ * em relaxação, contactor aberto) e (b) telemetria/reporte por evento.
+ *
+ * Como funciona: se houver NFAULT pendente sai logo (a ISR já decidiu abrir).
+ * Caso contrário, fecha (logicamente) só em MONITORING sem falhas — passando
+ * pelas barreiras internas de BMS_ContactorClose — e abre em qualquer outro
+ * estado.
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
@@ -75,7 +85,14 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
 }
 
 /**
- * @brief  Limpeza física dos registos de latch de fault em todos os dispositivos
+ * @brief  Limpa os registos de latch de falha em todos os dispositivos
+ *
+ * Para que serve: passo obrigatório antes de tentar voltar a MONITORING após
+ * uma falha. Os BQ79616/BQ79600 retêm (latch) as falhas em hardware; sem este
+ * clear, o NFAULT voltaria a disparar de imediato.
+ *
+ * Como funciona: escreve 0xFF em FAULT_RST1/RST2 por broadcast (slaves) e, como
+ * o broadcast não chega à bridge, repete em single-write para a bridge.
  */
 static BMS_Status_t BMS_ClearHardwareFaultLatches(BMS_Handle_t *hbms)
 {
@@ -98,7 +115,20 @@ static BMS_Status_t BMS_ClearHardwareFaultLatches(BMS_Handle_t *hbms)
 }
 
 /**
- * @brief  Tentativa de recuperação e reset de faults após shutdown
+ * @brief  Tentativa de recuperação automática a partir do estado FAULT
+ *
+ * Para que serve: dá ao sistema a hipótese de recuperar de falhas transitórias
+ * (ex.: ring break recuperável) sem intervenção humana, mas SEM nunca religar
+ * sobre uma condição perigosa.
+ *
+ * Como funciona:
+ *  - Limita as tentativas: à 4ª (retry > 3) desiste e adormece o pack em
+ *    segurança (BMS_EnterSleep), evitando o ciclo infinito FAULT→SHUTDOWN→FAULT.
+ *  - Reavalia tensões/temperaturas e marca como NÃO recuperável se a grandeza
+ *    em falha ainda está perto do limite (OV/UV/OT), ou se a falha é física
+ *    (open-wire) ou de comunicação total.
+ *  - Só se recuperável: limpa os latches de hardware, zera as flags por célula
+ *    e regressa a MONITORING (reabilitando a decisão de fechar o contactor).
  */
 static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
                                       uint32_t *retry_counter)
@@ -179,6 +209,29 @@ static void BMS_FaultRecoveryAttempt(BMS_Handle_t *hbms,
  * PONTO DE ENTRADA DA APLICAÇÃO BMS
  * ========================================================================= */
 
+/**
+ * @brief  Ponto de entrada da aplicação BMS (chamado de main.c, USER CODE BEGIN 2)
+ *
+ * Para que serve: é o "main" funcional do BMS. Põe o hardware em estado seguro,
+ * inicializa a daisy-chain, corre o auto-teste e entra no super-loop que
+ * monitoriza o pack e actua a malha de segurança/relés indefinidamente.
+ *
+ * Como funciona (fases):
+ *  FASE 1  — Relés/LED em estado seguro (ANTES de tudo), depois BMS_Init. Se o
+ *            init falhar, fica num loop que NÃO refresca o IWDG de propósito:
+ *            o watchdog (~500 ms) reseta e re-tenta (auto-recuperação Via B).
+ *  FASE 1b — Telemetria USART2 (TX-only).
+ *  FASE 1c — IWDG já armado pelo CubeMX; aqui só se anuncia.
+ *  FASE 1d — POST (CRC/Comm/ADC/NFAULT).
+ *  FASE 2  — Leituras iniciais (incl. tensão do bus) e decisão lógica inicial
+ *            de contactor; 1ª passagem da malha de relés + reporte inicial.
+ *  FASE 3  — Super-loop: em TODAS as iterações refresca o IWDG e corre
+ *            BMS_Relays_Task (debounce, blink 1 Hz, pré-carga não-bloqueante);
+ *            processa NFAULT fora da cadência (propagando logo aos relés);
+ *            a cada 100 ms corre BMS_Task_100ms + decisão de contactor, reporta
+ *            por evento (mudança de contactor/BMS_OK), gere o recovery em FAULT
+ *            (50 ciclos, máx. 3 tentativas) e envia o heartbeat de telemetria a 1 Hz.
+ */
 void BMS_Main(void)
 {
     BMS_Status_t status;

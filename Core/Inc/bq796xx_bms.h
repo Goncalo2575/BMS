@@ -2,16 +2,31 @@
  * @file    bq796xx_bms.h
  * @brief   BMS Driver - STM32F446 + BQ79600-Q1 Bridge + 2x BQ79616-Q1 Slaves
  *          Topologia: Anel Daisy-Chain Isolado (Ring)
- *          Configuração: 2 Slaves x 15 células = 30 células totais
+ *          Configuração: 2 Slaves x 15 células = 30 células totais (NMC, 4.20 V)
  *
- *  ARQUITECTURA DE ACTUAÇÃO (v3.2):
- *  Este MCU NÃO comanda fisicamente o contactor nem os interlocks.
- *  É um MONITOR que DECIDE e REPORTA. O contactor, BMS_OK e PRECHARGE_OK
- *  são geridos por um módulo MASTER externo (colega), que lê a decisão
- *  deste BMS pela saída de debug (USART2, PA2). Os únicos pinos usados:
- *    PA0/PA1 = UART4 (bridge BQ79600)   PA2/PA3 = USART2 (debug TX-only)
- *    PA8     = NFAULT (entrada, EXTI8 falling, pull-up)
- *  Não há saídas GPIO de contactor/interlock neste MCU.
+ *  ARQUITECTURA DE ACTUAÇÃO (v3.3 — ACTUALIZADA):
+ *  Esta camada (driver BQ796xx) continua a ser um MONITOR que DECIDE e
+ *  REPORTA: calcula as decisões LÓGICAS de segurança (contactor_closed,
+ *  bms_ok, precharge_ready) e guarda-as no handle; NÃO acciona pinos.
+ *  A ACTUAÇÃO FÍSICA dos relés/contactores e do LED cluster é feita pelo
+ *  módulo bms_relays.c, que corre NESTE MESMO MCU — já NÃO existe um módulo
+ *  MASTER externo. A máquina de segurança SAFE/ENGAGED/CHARGING/NOT_SAFE
+ *  (bms_relays) lê estas decisões + a tensão do bus/pack e comanda o hardware.
+ *
+ *  ⚠ Isto SUPERSEDE a nota da v3.2 ("sem actuação GPIO neste MCU"). Esta
+ *    alteração de arquitectura DEVE ser registada no FMEA/FTA do projecto.
+ *
+ *  PINOS USADOS NESTE MCU:
+ *    PA0/PA1        UART4  (bridge BQ79600, 1 Mbps, DMA)
+ *    PA2/PA3        USART2 (telemetria/debug TX-only, 115200)
+ *    PA8            NFAULT (entrada, EXTI8 falling, pull-up)
+ *    PA13/PA14/PB3  SWD/SWO (programação + trace; CubeMX "Trace Asynchronous SW")
+ *    Relés:   PC0 pré-carga  PC1 charge  PC2 descarga  PC4 BMS_relay  PA6 BMS_charge
+ *    LED:     PA15 verde  PC11 vermelho  PC12 azul
+ *    Monitor: PB0 IMD  PC8 TSMS  PC6 ESDB  PB14 ESDB_chg  PB12 charger_sig
+ *  (mapa completo, polaridades e conflitos resolvidos: ver bms_relays.h)
+ *
+ * @version 3.3.0
  */
 
 #ifndef BQ796XX_BMS_H
@@ -26,9 +41,9 @@
  * RASTREABILIDADE DE BUILD
  * ========================================================================= */
 #define BMS_FW_VERSION_MAJOR        3U
-#define BMS_FW_VERSION_MINOR        2U
+#define BMS_FW_VERSION_MINOR        3U
 #define BMS_FW_VERSION_PATCH        0U
-#define BMS_FW_VERSION_STRING       "3.2.0"
+#define BMS_FW_VERSION_STRING       "3.3.0"
 
 /* =========================================================================
  * CONFIGURAÇÃO GERAL DO SISTEMA
@@ -58,7 +73,11 @@
  * timeout (~500 ms), não há risco de reset prematuro no caminho normal. Se o
  * arranque falhar e o MCU ficar preso, o IWDG reseta e RE-TENTA o init
  * (auto-recuperação de falhas transitórias do BQ79600). Os defines abaixo
- * servem de referência única da configuração e são usados na verificação. */
+ * servem de referência única da configuração e são usados na verificação.
+ *
+ * NOTA (actuação dos relés): a temporização longa da pré-carga (750 ms) NÃO
+ * pode usar HAL_Delay no super-loop — excederia o timeout do IWDG. Em
+ * bms_relays.c essa espera é NÃO-BLOQUEANTE (baseada em HAL_GetTick). */
 #define BMS_IWDG_PRESCALER          IWDG_PRESCALER_64
 #define BMS_IWDG_RELOAD             250U     /* ~500 ms timeout */
 
@@ -155,21 +174,31 @@
 #define BMS_NUM_TEMP_SENSORS        3U    /* GPIO1, GPIO2, GPIO3 por slave */
 #define BMS_AUX_READ_BYTES          10U   /* GPIO1+GPIO2+GPIO3+GPIO4+TSREF = 5x2 */
 
-/* Pre-carga HV Bus (GPIO4) */
-#define HV_BUS_ATTENUATION_RATIO    27U       /* divisor resistivo da 27,110 */
-#define PRECHARGE_THRESHOLD_MV      113400UL  /* 90% * 126V */
+/* =========================================================================
+ * PRÉ-CARGA / TENSÃO HV DO BARRAMENTO (GPIO4 do Slave 1)
+ * =========================================================================
+ * BUG-FIX (v3.3): o divisor resistivo do barramento HV é 27.11, não 27. Usar
+ * um inteiro (27U) introduzia ~0.4% de erro por defeito (a 126 V lia ~125.5 V),
+ * o que desloca o limiar de pré-carga. Passou a ponto-fixo NUM/DEN:
+ *     V_bus_mV = V_adc_mV × HV_BUS_ATTENUATION_NUM / HV_BUS_ATTENUATION_DEN
+ * (sem overflow: V_adc_mV ≤ ~12500 mV → ×2711 ≈ 3.4e7, cabe em uint32). */
+#define HV_BUS_ATTENUATION_NUM      2711U     /* 27.11 × 100 */
+#define HV_BUS_ATTENUATION_DEN      100U
+#define PRECHARGE_THRESHOLD_MV      113400UL  /* 90% × 126 V (30S × 4.20 V) */
 
 /* =========================================================================
- * INTERLOCKS — APENAS LÓGICOS (sem GPIO neste MCU)
+ * INTERLOCKS LÓGICOS (calculados aqui) + ACTUAÇÃO (módulo bms_relays)
  * =========================================================================
- * As decisões de segurança (contactor abrir/fechar, BMS_OK, PRECHARGE_OK)
- * NÃO accionam pinos neste MCU. São calculadas e guardadas no handle
- * (hbms->contactor_closed, hbms->bms_ok, hbms->precharge_ready) e
- * comunicadas ao módulo MASTER pela saída de debug (USART2). O master é
- * que actua sobre o hardware (contactor, relés, etc.).
+ * Esta camada calcula e guarda no handle as decisões LÓGICAS de segurança:
+ *   hbms->contactor_closed, hbms->bms_ok, hbms->precharge_ready.
+ * NÃO acciona pinos. O módulo bms_relays.c (mesmo MCU) consome estes valores
+ * e a tensão do bus/pack para actuar fisicamente os relés e o LED cluster.
+ * A telemetria USART2 reporta tanto a DECISÃO lógica (ctor/ok/pre) como o
+ * ESTADO REAL dos relés (rly[...]) — ver bms_master_comm.c.
  *
- * Os antigos #define BMS_OK_PORT/PIN, PRECHARGE_OK_PORT/PIN (GPIOB 13/14)
- * e o contactor em GPIOB PIN12 foram REMOVIDOS — este MCU usa só PA0-3+PA8. */
+ * Os antigos #define BMS_OK_PORT/PIN, PRECHARGE_OK_PORT/PIN e o contactor
+ * em GPIOB foram removidos desta camada; a pinagem física de actuação vive
+ * agora em bms_relays.h. */
 
 /* =========================================================================
  * PINO DE TX DA BRIDGE (controlo GPIO directo para pulsos WAKE/SHUTDOWN/RESET/COMM CLEAR)
@@ -189,7 +218,11 @@
  * HARDWARE ACTUAL: NFAULT da BQ79600 ligado a PA8.
  *   EXTI linha 8 → vector EXTI9_5_IRQHandler (gerado pelo CubeMX).
  *   Configurar PA8 como GPIO_EXTI8, Falling edge, Pull-up, NVIC prioridade 0.
- *   (A versão original usava PC13/EXTI13; alterado para PA8.) */
+ *   (A versão original usava PC13/EXTI13; alterado para PA8.)
+ *
+ * NOTA: os monitores de segurança (IMD/TSMS/ESDB/...) em bms_relays.c são
+ * lidos por POLLING com debounce — NÃO usam EXTI — para não colidir com a
+ * linha EXTI9_5 partilhada pelo NFAULT. */
 #define BMS_NFAULT_PORT             GPIOA
 #define BMS_NFAULT_PIN              GPIO_PIN_8   /* PA8 = NFAULT (EXTI8) */
 
@@ -354,16 +387,16 @@ typedef struct {
     bool                ring_intact;            /* Anel fisicamente completo */
     bool                ring_using_reverse;     /* Testemunha: firmware a usar DIR1 após ring break */
 
-    /* DECISÕES REPORTADAS AO MASTER (sem GPIO neste MCU) */
+    /* DECISÕES LÓGICAS (consumidas por bms_relays para actuar) */
     volatile bool       contactor_closed;       /* DECISÃO: contactor deve estar fechado?
                                                  * (escrito na ISR NFAULT → volatile) */
-    bool                bms_ok;                 /* INTERLOCK lógico BMS_OK reportado ao master */
+    bool                bms_ok;                 /* INTERLOCK lógico BMS_OK */
 
     /* Dados dos Slaves */
     BMS_SlaveData_t     slave[BMS_NUM_SLAVES];
 
     /* Métricas globais */
-    uint32_t            pack_voltage_mv;        /* Soma das tensões (uint32: 30S×3600mV>UINT16_MAX) */
+    uint32_t            pack_voltage_mv;        /* Soma das tensões (uint32: 30S×4250mV>UINT16_MAX) */
     uint16_t            min_cell_mv;
     uint16_t            max_cell_mv;
     uint16_t            delta_cell_mv;          /* Desequilíbrio */
@@ -381,7 +414,7 @@ typedef struct {
 
     /* Pre-carga e tensão HV */
     uint32_t            inverter_voltage_mv;
-    bool                precharge_ready;        /* PRECHARGE_OK lógico reportado ao master */
+    bool                precharge_ready;        /* PRECHARGE_OK lógico */
 
     /* Balanceamento passivo */
     bool                is_balancing;
