@@ -48,20 +48,18 @@ extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
  * ========================================================================= */
 
 /**
- * @brief  Decisão LÓGICA de contactor (sinal p/ inversor via CAN; gating de SoC)
+ * @brief  Mantém a expectativa interna de "tração activa" (contactor_closed)
  *
- * Para que serve: mantém a variável de decisão contactor_closed coerente com o
- * estado do BMS. NÃO acciona pinos — o contactor principal (AIR) é atracado
- * pelo INVERSOR ao receber esta decisão por CAN (a implementar). Serve ainda
+ * Para que serve: mantém contactor_closed coerente com o estado do BMS. NÃO
+ * comanda contactores nem pinos — o Line_contactor é fechado pelo INVERSOR
+ * (Sevcon Gen4 Size 6) quando B+ atinge o limiar programado. Esta flag serve só
  * para (a) gating do cálculo de SoC e (b) telemetria/reporte por evento.
  *
- * Como funciona: se houver NFAULT pendente sai logo (a ISR já decidiu abrir).
- * Caso contrário, decide "fechar" em operação normal (MONITORING ou BALANCING,
- * sem falhas) E desde que NÃO esteja a carregar — passando pelas barreiras de
- * BMS_ContactorClose — e "abrir" em qualquer outro caso (incluindo CHARGING).
- * BALANCING conta como normal (HV ligada). Em CHARGING a decisão é sempre
- * "abrir": separação total tração/carga (D.5.3.7) — o AIR nunca é comandado
- * fechado a carregar.
+ * Como funciona: se houver NFAULT pendente sai logo. Caso contrário, marca
+ * "tração activa" em operação normal (MONITORING ou BALANCING, sem falhas) e
+ * desde que NÃO esteja a carregar — passando pelas barreiras de
+ * BMS_ContactorClose — e "inactiva" em qualquer outro caso (incluindo CHARGING,
+ * por separação total tração/carga — D.5.3.7).
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
@@ -86,7 +84,7 @@ static void BMS_ContactorControl(BMS_Handle_t *hbms)
     {
         if (hbms->contactor_closed)
         {
-            BMS_ContactorOpen(hbms);    /* inclui CHARGING → AIR inibido */
+            BMS_ContactorOpen(hbms);    /* inclui CHARGING → tração inactiva */
         }
     }
 }

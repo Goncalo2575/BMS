@@ -2,10 +2,10 @@
  * @file    bms_relays.c
  * @brief   BMS - Máquina de estados de segurança + actuação de relés (implementação)
  *
- *  Porta fiel da lógica da BMS do ano passado (ver main.c PL455), adaptada à
+ *  
  *  BMS actual (BQ796xx):
  *    - BMS_OK         <- derivado de hbms->fault_flags + nfault_pending
- *    - tensão do bus  <- hbms->inverter_voltage_mv (GPIO4 / sensor HV)
+ *    - tensão do B+  <- hbms->inverter_voltage_mv (GPIO4 / sensor HV)
  *    - tensão do pack <- hbms->pack_voltage_mv (soma das células)
  *    - monitores      <- polling com debounce (sem EXTI; evita conflito com
  *                        a EXTI9_5 do NFAULT)
@@ -158,12 +158,13 @@ void BMS_Relays_Init(void)
     RLY_CLOSE(BMS_RELAY_PORT,       BMS_RELAY_PIN);       /* BMS relay fechado */
     RLY_CLOSE(BMS_BMSCHARGE_PORT,   BMS_BMSCHARGE_PIN);   /* BMS charge fechado */
     RLY_OPEN (BMS_CHARGE_RELAY_PORT,BMS_CHARGE_RELAY_PIN);/* charger relay aberto */
-    RLY_OPEN (BMS_PRE_CHARGE_PORT,  BMS_PRE_CHARGE_PIN);
-    RLY_OPEN (BMS_DISCHARGE_PORT,   BMS_DISCHARGE_PIN);
+    RLY_OPEN (BMS_PRE_CHARGE_PORT,  BMS_PRE_CHARGE_PIN);  /* pré-carga aberto */
+    RLY_OPEN (BMS_DISCHARGE_PORT,   BMS_DISCHARGE_PIN);   /* descarga aberto */
 
-    RLY_OPEN (BMS_LED_RED_PORT,   BMS_LED_RED_PIN);
-    RLY_OPEN (BMS_LED_GREEN_PORT, BMS_LED_GREEN_PIN);
-    RLY_OPEN (BMS_LED_BLUE_PORT,  BMS_LED_BLUE_PIN);
+    RLY_OPEN (BMS_LED_RED_PORT,   BMS_LED_RED_PIN);     /* LED vermelho apagado */
+    RLY_OPEN (BMS_LED_GREEN_PORT, BMS_LED_GREEN_PIN);   /* LED verde apagado */
+    RLY_OPEN (BMS_LED_BLUE_PORT,  BMS_LED_BLUE_PIN);    /* LED azul apagado */
+
 
     /* --- Estado lógico --- */
     s_state                  = BMS_RLY_NOT_SAFE;
@@ -174,11 +175,11 @@ void BMS_Relays_Init(void)
     s_bms_relay_open_latched = false;
     s_engaged_tick           = 0U;
 
-    mon_seed(MON_IMD,      BMS_IMD_STATUS_PORT,  BMS_IMD_STATUS_PIN);
-    mon_seed(MON_TSMS,     BMS_TSMS_PORT,        BMS_TSMS_PIN);
-    mon_seed(MON_ESDB,     BMS_ESDB_PORT,        BMS_ESDB_PIN);
-    mon_seed(MON_ESDB_CHG, BMS_ESDB_CHG_PORT,    BMS_ESDB_CHG_PIN);
-    mon_seed(MON_CHARGER,  BMS_CHARGER_SIG_PORT, BMS_CHARGER_SIG_PIN);
+    mon_seed(MON_IMD,      BMS_IMD_STATUS_PORT,  BMS_IMD_STATUS_PIN);   /*verifica se o IMD está ativo */
+    mon_seed(MON_TSMS,     BMS_TSMS_PORT,        BMS_TSMS_PIN);         /*verifica se o TSMS está ativo */
+    mon_seed(MON_ESDB,     BMS_ESDB_PORT,        BMS_ESDB_PIN);         /*verifica se o ESDB está ativo */
+    mon_seed(MON_ESDB_CHG, BMS_ESDB_CHG_PORT,    BMS_ESDB_CHG_PIN);     
+    mon_seed(MON_CHARGER,  BMS_CHARGER_SIG_PORT, BMS_CHARGER_SIG_PIN);  /*verifica se o Charger está ativo */
 }
 
 /* =========================================================================
@@ -193,24 +194,25 @@ void BMS_Relays_Init(void)
  * o blink do LED e a pré-carga temporizada serem fluidos. Por etapas:
  *  1) amostra+debounce dos 5 monitores;
  *  2) deriva BMS_OK (fault_flags + nfault_pending) e bms_state_active (estado);
- *  3) lê tensões do bus/pack para a lógica de pré-carga/descarga;
+ *  3) lê tensões do B+/pack para a lógica de pré-carga/descarga;
  *  4) relé do carregador segue o optoacoplador (charger);
- *  5) BMS_relay + BMS_charge (relés da malha de segurança, NÃO o contactor
- *     principal) ABREM em falha OU fora de estado activo e ficam em LATCH;
- *  6) calcula esdb_flag (leitura DIRECTA do pino) e tsms_flag;
- *  7) auto-abertura de descarga/pré-carga por tensão do bus (excepto bleed em
+ *  5) BMS_relay + BMS_charge ABREM em falha OU fora de estado activo e ficam em LATCH;
+ *  6) calcula esdb_flag e tsms_flag;
+ *  7) auto-abertura de descarga/pré-carga por tensão do B+ (excepto bleed em
  *     CHARGING, que se mantém fechado);
  *  8) selecciona SAFE/ENGAGED/CHARGING/NOT_SAFE (NOT_SAFE tem prioridade e
  *     cobre também SLEEP/SHUTDOWN/UNINIT/FAULT);
  *  9) acções de ENTRADA de estado: SAFE/NOT_SAFE = bleed transitório; CHARGING =
- *     bleed CONTÍNUO (bus de tração a 0 V, D.5.3.7); ENGAGED = pré-carga;
+ *     bleed CONTÍNUO; ENGAGED = pré-carga;
  * 10) pré-carga adiada do ENGAGED (750 ms, não-bloqueante);
  * 11) conduz o LED cluster a partir do estado.
  *
- *  ⚠ NENHUM destes relés é o contactor principal de tração. O contactor
- *    principal (AIR) é comandado pelo INVERSOR via CAN (a implementar): este
- *    MCU faz a pré-carga e, no futuro, reporta "pré-carga concluída/bus pronto"
- *    por CAN para o inversor atracar o AIR. PC2 = relé de DESCARGA/BLEED do bus.
+ *  ⚠ NENHUM destes relés é um contactor. O MCU comanda 5 RELÉS; existem 2
+ *    CONTACTORES que ele NÃO comanda:
+ *      • charge_contactor : segue o sinal combinado charge_relay + BMS_charge_relay;
+ *      • Line_contactor   : fechado pelo INVERSOR (Sevcon Gen4 Size 6) quando B+
+ *        atinge a tensão programada no inversor — sem comando do MCU.
+ *    PC2 = relé de DESCARGA/BLEED do B+ de tração (sobe/desce B+ via pré-carga/bleed).
  */
 void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
 {
@@ -235,23 +237,21 @@ void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
 
     /* Estado activo do BMS: só MONITORING/BALANCING têm aquisição a correr.
      * Em SLEEP/SHUTDOWN/UNINIT/FAULT/RING_RECOVERY o sistema NÃO está apto
-     * (corrige quirk: BMS_relay ficaria fechado em SLEEP/SHUTDOWN se, por
-     * acaso, fault_flags==0). Entra na decisão de relé e de estado de segurança. */
+     * Entra na decisão de relé e de estado de segurança. */
     bool bms_state_active = (hbms->state == BMS_STATE_MONITORING) ||
                             (hbms->state == BMS_STATE_BALANCING);
 
     /* --- 3) Tensões (mV) para pré-carga/descarga --- */
-    uint32_t bus_mv  = hbms->inverter_voltage_mv;
-    uint32_t pack_mv = hbms->pack_voltage_mv;
-    bool bus_ge_min  = (bus_mv >= BMS_BUS_MIN_MV);
-    bool bus_le_min  = (bus_mv <= BMS_BUS_MIN_MV);
-    uint32_t pre_thr = (pack_mv > 0U)
-                     ? (pack_mv * BMS_PRECHARGE_PCT_NUM) / BMS_PRECHARGE_PCT_DEN
-                     : 0U;
-    bool bus_ge_90   = (pack_mv > 0U) && (bus_mv >= pre_thr);
-    bool bus_lt_90   = (pack_mv > 0U) && (bus_mv <  pre_thr);
+    uint32_t bus_mv  = hbms->inverter_voltage_mv;       /*tensão do B+*/
+    uint32_t pack_mv = hbms->pack_voltage_mv;           /*tensão do pack*/
+    bool bus_ge_min  = (bus_mv >= BMS_BUS_MIN_MV);      /*B+ >= tensão mínima*/
+    bool bus_le_min  = (bus_mv <= BMS_BUS_MIN_MV);      /*B+ <= tensão mínima*/
+    uint32_t pre_thr = (pack_mv > 0U) ? (pack_mv * BMS_PRECHARGE_PCT_NUM) / BMS_PRECHARGE_PCT_DEN : 0U; /*calcula limite de pré-carga*/
+    bool bus_ge_90   = (pack_mv > 0U) && (bus_mv >= pre_thr);   /*B+ >= 90% da tensão do pack*/
+    bool bus_lt_90   = (pack_mv > 0U) && (bus_mv <  pre_thr);   /*B+ < 90% da tensão do pack*/
 
-    /* --- 4) Relé do CARREGADOR: segue o optoacoplador (charger ligado) --- */
+
+    /* --- 4) Relé do CARREGADOR (charger ligado)  --- */
     if (charger_opto)
     {
         if (!s_charger_relay_enable)
@@ -270,10 +270,10 @@ void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
     }
 
     /* --- 5) BMS relay + BMS charge: abrir em falha OU fora de estado activo
-     * (latch). NOTA: estes são relés da MALHA DE SEGURANÇA (loop de shutdown),
-     * NÃO o contactor principal. O contactor principal (AIR) é comandado pelo
-     * INVERSOR via CAN (a implementar). Aqui apenas abrimos a contribuição do
-     * BMS para o loop. !bms_state_active garante relé aberto em SLEEP/SHUTDOWN. */
+     * (latch). Estes são os relés de PERMISSÃO do BMS: BMS_relay alimenta o loop
+     * de segurança do Line_contactor (drive) e BMS_charge_relay o do
+     * charge_contactor — mesma lógica. NÃO são contactores. !bms_state_active
+     * garante relé aberto em SLEEP/SHUTDOWN. */
     if (!bms_ok || !imd_ok || !bms_state_active)
     {
         RLY_OPEN(BMS_RELAY_PORT,     BMS_RELAY_PIN);
@@ -300,9 +300,14 @@ void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
     bool tsms_flag = esdb_flag && tsms_wd;
 
     /* --- 7) Auto-abertura de descarga / pré-carga por tensão do bus ---
-     * EXCEPÇÃO: em CHARGING o bleed NÃO se auto-abre — mantém-se fechado para
-     * garantir o bus de tração a 0 V durante TODO o carregamento (D.5.3.7). */
-    if (s_dis_charge_enable && bus_le_min && (s_state != BMS_RLY_CHARGING))
+     * Em CHARGING com BMS_BLEED_HOLD_IN_CHARGING=1 o bleed NÃO se auto-abre —
+     * mantém-se fechado para garantir o bus de tração a 0 V durante TODO o
+     * carregamento (D.5.3.7). Com =0, comporta-se como SAFE (abre a ≤5 V). */
+    bool keep_bleed_charging = false;
+#if (BMS_BLEED_HOLD_IN_CHARGING)
+    keep_bleed_charging = (s_state == BMS_RLY_CHARGING);
+#endif
+    if (s_dis_charge_enable && bus_le_min && !keep_bleed_charging)
     {
         RLY_OPEN(BMS_DISCHARGE_PORT, BMS_DISCHARGE_PIN);
         s_dis_charge_enable = false;
@@ -362,22 +367,35 @@ void BMS_Relays_Task(BMS_Handle_t *hbms, uint32_t now_ms)
 
             case BMS_RLY_CHARGING:
                 /* Carregamento: bus de TRAÇÃO tem de estar a 0 V durante TODO o
-                 * processo (D.5.3.7) → bleed (PC2) FECHADO de forma contínua
-                 * (o passo 7 não o auto-abre em CHARGING). A 0 V o resistor
-                 * dissipa ~0, logo não há problema térmico. Pré-carga desligada.
-                 * O contactor principal (AIR) está inibido por CAN (separação
-                 * total tração/carga — ver BMS_ContactorControl/Close). */
+                 * processo (D.5.3.7). Pré-carga sempre desligada. O bleed (PC2)
+                 * é tratado conforme BMS_BLEED_HOLD_IN_CHARGING (ver bms_relays.h
+                 * — depende de o resistor estar no lado do inversor).
+                 * Com B+ a 0 V e a pré-carga aberta, o INVERSOR não fecha o
+                 * Line_contactor → tração isolada durante todo o carregamento. */
                 RLY_OPEN(BMS_PRE_CHARGE_PORT, BMS_PRE_CHARGE_PIN);
                 s_pre_charge_enable = false;
+#if (BMS_BLEED_HOLD_IN_CHARGING)
+                /* HOLD: bleed FECHADO contínuo (mantém B+ a 0 V). A 0 V o
+                 * resistor dissipa ~0 W (seguro só com bleed no lado do inversor). */
                 RLY_CLOSE(BMS_DISCHARGE_PORT, BMS_DISCHARGE_PIN);
                 s_dis_charge_enable = true;
+#else
+                /* SAFE-like: bleed transitório — fecha se houver tensão, o
+                 * passo 7 abre-o a ≤5 V (usar se o bleed puder ver tensão de carga). */
+                if (!s_dis_charge_enable && bus_ge_min)
+                {
+                    RLY_CLOSE(BMS_DISCHARGE_PORT, BMS_DISCHARGE_PIN);
+                    s_dis_charge_enable = true;
+                }
+#endif
                 break;
 
             case BMS_RLY_ENGAGED:
                 /* Bleed desligado (não se sangra o bus em condução); pré-carga
-                 * adiada BMS_PRECHARGE_DELAY_MS. O contactor principal (AIR)
-                 * é atracado pelo INVERSOR (via CAN, a implementar) quando a
-                 * pré-carga atingir o limiar — não aqui. */
+                 * adiada BMS_PRECHARGE_DELAY_MS. A pré-carga sobe B+; quando B+
+                 * atinge o limiar programado, o INVERSOR (Sevcon Gen4) fecha o
+                 * Line_contactor autonomamente — o MCU não o comanda, só remove
+                 * a pré-carga (passo 7) quando B+ chega a ~90% do pack. */
                 RLY_OPEN(BMS_DISCHARGE_PORT, BMS_DISCHARGE_PIN);
                 s_dis_charge_enable = false;
                 s_engaged_tick      = now_ms;

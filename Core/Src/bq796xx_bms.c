@@ -823,6 +823,14 @@ BMS_Status_t BMS_Init(BMS_Handle_t *hbms, UART_HandleTypeDef *huart,
 
     g_hbms_irq = hbms;
 
+    /* IWDG (~500 ms) já armado pelo CubeMX antes do BMS_Main. O BMS_Init tem
+     * fases bloqueantes (wake/propagação/settle + dezenas de transacções UART
+     * que, com latências/timeouts, podem aproximar-se do timeout). Refrescar
+     * em pontos estratégicos (cada fase é limitada no tempo — não mascara hang)
+     * evita um reset prematuro a meio do arranque. NÃO refrescar no loop de
+     * falha de init (esse é o mecanismo de auto-recuperação "Via B"). */
+    BMS_IWDG_Refresh();
+
     status = BMS_AutoAddressing(hbms);
     if (status != BMS_OK)
     {
@@ -831,6 +839,10 @@ BMS_Status_t BMS_Init(BMS_Handle_t *hbms, UART_HandleTypeDef *huart,
         return BMS_ERR_INIT_FAILED;
     }
 
+    /* Refresco estratégico entre as duas fases pesadas (endereçamento ↔
+     * configuração), conforme análise de temporização IWDG vs boot. */
+    BMS_IWDG_Refresh();
+
     status = BMS_ConfigureSlaves(hbms);
     if (status != BMS_OK)
     {
@@ -838,6 +850,7 @@ BMS_Status_t BMS_Init(BMS_Handle_t *hbms, UART_HandleTypeDef *huart,
         return BMS_ERR_INIT_FAILED;
     }
 
+    BMS_IWDG_Refresh();
     hbms->state = BMS_STATE_MONITORING;
     return BMS_OK;
 }

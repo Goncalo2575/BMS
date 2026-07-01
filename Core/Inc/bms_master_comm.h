@@ -38,9 +38,6 @@ typedef struct {
     uint32_t             tx_count;  /* Nº de linhas de debug enviadas */
 } BMS_MasterComm_t;
 
-/* =========================================================================
- * API PÚBLICA
- * ========================================================================= */
 
 /**
  * @brief  Inicializa a saída de debug. Apenas guarda o handle do USART2.

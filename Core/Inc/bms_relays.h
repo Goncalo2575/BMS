@@ -8,15 +8,24 @@
  *  conduzir o LED cluster a partir do estado de segurança.
  *
  *  ⚠ ARQUITECTURA (v3.3): isto SUPERSEDE a nota "decide e reporta, sem actuação"
- *    da v3.2. Este MCU é agora o actuador dos relés. Actualizar o FMEA/FTA.
+ *    da v3.2. Este MCU é agora o actuador dos 5 RELÉS. Actualizar o FMEA/FTA.
  *
- *  ⚠ NENHUM destes pinos é o CONTACTOR PRINCIPAL de tração (AIR). O contactor
- *    principal é comandado pelo INVERSOR, via um sinal CAN que este MCU enviará
- *    (a implementar). Aqui actuam-se apenas RELÉS auxiliares/de segurança:
- *      PC0 pré-carga · PC1 charge (carregador) · PC2 DESCARGA/BLEED do bus ·
- *      PC4 BMS_relay (loop de shutdown) · PA6 BMS_charge.
- *    A variável contactor_closed (no handle do BMS) é a DECISÃO lógica destinada
- *    ao inversor por CAN — não comanda nenhum pino deste MCU.
+ *  ── O MCU COMANDA 5 RELÉS ────────────────────────────────────────────────
+ *    PC0 pre_charge_relay · PC2 discharge_relay (bleed) · PC1 charge_relay ·
+ *    PA6 BMS_charge_relay · PC4 BMS_relay   (BMS_relay e BMS_charge_relay têm
+ *    a MESMA lógica: abrem em falha do BMS e ficam em latch).
+ *
+ *  ── 2 CONTACTORES (NÃO comandados por este MCU) ──────────────────────────
+ *    • charge_contactor : fecha/abre conforme o sinal COMBINADO de
+ *      charge_relay + BMS_charge_relay (carregador presente E BMS a permitir).
+ *    • Line_contactor (pack ↔ inversor): controlado pelo INVERSOR (Sevcon Gen4
+ *      Size 6), que o fecha AUTONOMAMENTE quando B+ atinge a tensão programada
+ *      internamente no inversor. NÃO há comando deste MCU (nem CAN) para o
+ *      fechar — o MCU só fornece a PRÉ-CARGA (sobe B+) e o BLEED (desce B+).
+ *
+ *  A variável contactor_closed (no handle do BMS) NÃO comanda nada: é apenas a
+ *  expectativa interna de "sistema de tração activo", usada para gating do SoC
+ *  e telemetria.
  *
  *  ── ESTADOS (regulamento FS/TS) ─────────────────────────────────────────
  *    SAFE      : verde intermitente 1 Hz   (TSMS aberto, relés todos fechados)
@@ -91,6 +100,21 @@
 /* Reclose automático do BMS_relay após a falha desaparecer.
  * 0 = latch aberto (igual ao ano passado: requer reset). 1 = re-fecha. */
 #define BMS_RELAY_AUTO_RECLOSE      0
+
+/* Comportamento do relé de DESCARGA/BLEED (PC2) durante CHARGING.
+ * ⚠ DEPENDE DO LAYOUT FÍSICO — confirmar no esquema onde está o resistor:
+ *   1 = HOLD: bleed FECHADO de forma contínua → mantém o bus de tração a 0 V
+ *       durante todo o carregamento (D.5.3.7). SÓ É SEGURO se o resistor de
+ *       bleed estiver no lado do INVERSOR (depois do Line_contactor): com o
+ *       contactor aberto o bus está a 0 V, P = V²/R = 0 W.
+ *   0 = SAFE-like: bleed transitório (fecha se bus>5 V, o passo 7 abre a ≤5 V).
+ * NOTA: se o resistor estiver no lado do PACK/carga (vê 126 V em carga), NENHUMA
+ * destas opções o protege — em SAFE-like também ficaria fechado para sempre
+ * (o pack nunca desce a 5 V) e queimaria. Aliás, a lógica existente (abrir a
+ * ≤5 V) só funciona se o bus PUDER chegar a ~0 V, o que implica bleed no lado
+ * do inversor. Um bleed do lado do pack é um ERRO DE HARDWARE, não de software.
+ * Default = 1 (assume bleed no lado do inversor, requisito para cumprir D.5.3.7). */
+#define BMS_BLEED_HOLD_IN_CHARGING  1
 
 /* =========================================================================
  * TIPOS

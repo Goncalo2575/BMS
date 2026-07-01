@@ -575,10 +575,12 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
  *     bus/pack e ACCIONA fisicamente os RELÉS auxiliares/de segurança
  *     (PC0 pré-carga, PC1 charge, PC2 descarga/bleed, PC4 BMS_relay, PA6
  *     BMS_charge) e o LED cluster, com a máquina SAFE/ENGAGED/CHARGING/NOT_SAFE.
- *   • O CONTACTOR PRINCIPAL de tração (AIR) NÃO é actuado por este MCU: é
- *     comandado pelo INVERSOR, com base num sinal CAN que este MCU enviará
- *     (a implementar). contactor_closed é precisamente essa DECISÃO lógica
- *     destinada ao inversor — não comanda nenhum pino aqui.
+ *   • Os 2 CONTACTORES NÃO são actuados por este MCU:
+ *       - charge_contactor : segue o sinal combinado charge_relay + BMS_charge_relay;
+ *       - Line_contactor   : fechado AUTONOMAMENTE pelo INVERSOR (Sevcon Gen4
+ *         Size 6) quando B+ atinge a tensão programada no inversor. O MCU não o
+ *         comanda; só fornece pré-carga/bleed. contactor_closed é apenas a
+ *         expectativa interna de "tração activa" (gating de SoC/telemetria).
  *
  * RISCOS RESIDUAIS QUE TÊM DE SER TRATADOS NA ANÁLISE DE SEGURANÇA:
  *
@@ -608,15 +610,13 @@ BMS_Status_t BMS_RingRecovery(BMS_Handle_t *hbms)
  * ========================================================================= */
 
 /**
- * @brief  Regista a DECISÃO de abrir o contactor (sinal lógico p/ inversor via CAN)
+ * @brief  Limpa a expectativa interna de "tração activa" (contactor_closed=false)
  *
- *  Esta camada não comanda pinos. Aqui apenas:
+ *  Esta camada não comanda contactores nem pinos. Aqui apenas:
  *   - pára o balanceamento (evita dissipar com o pack a ser isolado);
- *   - regista a decisão lógica contactor_closed=false (destinada ao inversor
- *     por CAN — a implementar).
- *  A abertura física dos RELÉS de segurança (BMS_relay) é feita por bms_relays.c
- *  quando deteta bms_ok=false / estado de falha; o contactor principal (AIR)
- *  é aberto pelo inversor ao receber esta decisão.
+ *   - regista contactor_closed=false (flag interna p/ gating de SoC/telemetria).
+ *  A abertura física dá-se nos RELÉS de segurança (BMS_relay, por bms_relays.c)
+ *  e o Line_contactor abre quando o inversor deixa de o manter fechado (B+ cai).
  */
 void BMS_ContactorOpen(BMS_Handle_t *hbms)
 {
@@ -624,22 +624,22 @@ void BMS_ContactorOpen(BMS_Handle_t *hbms)
     {
         (void)BMS_StopAllBalancing(hbms);
     }
-    hbms->contactor_closed = false;   /* DECISÃO: abrir */
+    hbms->contactor_closed = false;   /* expectativa interna: tração inactiva */
 }
 
 /**
- * @brief  Regista a DECISÃO de fechar o contactor (sinal lógico p/ inversor via CAN)
+ * @brief  Marca a expectativa interna de "tração activa" (contactor_closed=true)
  *
- *  PRÉ-CONDIÇÕES DE SEGURANÇA (todas têm de ser verdadeiras):
+ *  NÃO comanda o Line_contactor — esse é fechado pelo INVERSOR (Sevcon Gen4)
+ *  quando B+ atinge o limiar programado. Esta flag é só a expectativa interna
+ *  do BMS (gating de SoC/telemetria) e só é marcada se TODAS as barreiras
+ *  abaixo passarem, garantindo que nunca indicamos "tração activa" numa
+ *  condição insegura:
  *   [1] nfault_pending == 0   — evento de hardware NÃO processado (BARREIRA CRÍTICA)
  *   [2] fault_flags == 0      — sem falhas mapeadas pelo software
  *   [3] state == MONITORING ou BALANCING — operação normal (HV ligada)
  *   [4] min_cell_mv >= CELL_UV_MV && max_cell_mv <= CELL_OV_MV — tensões OK
- *   [5] NÃO está em CHARGING   — separação total tração/carga (D.5.3.7): o AIR
- *                                não pode ser comandado fechado a carregar.
- *
- *  Estas barreiras garantem que a DECISÃO nunca é "fechar" sobre uma condição
- *  insegura. O contactor principal é depois atracado pelo inversor (via CAN).
+ *   [5] NÃO está em CHARGING   — separação total tração/carga (D.5.3.7)
  */
 void BMS_ContactorClose(BMS_Handle_t *hbms)
 {
@@ -669,7 +669,7 @@ void BMS_ContactorClose(BMS_Handle_t *hbms)
     }
     /* BARREIRA 5: carregador ligado → separação total tração/carga.
      * O circuito de tração tem de estar isolado e a 0 V durante TODO o
-     * carregamento; nunca comandar o AIR fechado nesta condição. */
+     * carregamento; não indicar "tração activa" nesta condição. */
     if (BMS_Relays_GetState() == BMS_RLY_CHARGING)
     {
         return;

@@ -12,9 +12,11 @@
  *  pelo módulo bms_relays.c, que corre NESTE MESMO MCU — já NÃO existe um módulo
  *  MASTER externo. A máquina de segurança SAFE/ENGAGED/CHARGING/NOT_SAFE
  *  (bms_relays) lê estas decisões + a tensão do bus/pack e comanda o hardware.
- *  O CONTACTOR PRINCIPAL de tração (AIR) NÃO é actuado por este MCU: é comandado
- *  pelo INVERSOR via um sinal CAN que este MCU enviará (a implementar);
- *  contactor_closed é essa decisão lógica.
+ *  O Line_contactor (pack ↔ inversor) NÃO é actuado por este MCU: é fechado
+ *  AUTONOMAMENTE pelo INVERSOR (Sevcon Gen4 Size 6) quando B+ atinge a tensão
+ *  programada no inversor. O MCU só fornece a pré-carga (sobe B+) e o bleed
+ *  (desce B+); contactor_closed é apenas a expectativa interna de "tração
+ *  activa" (gating de SoC/telemetria), não um comando.
  *
  *  ⚠ Isto SUPERSEDE a nota da v3.2 ("sem actuação GPIO neste MCU"). Esta
  *    alteração de arquitectura DEVE ser registada no FMEA/FTA do projecto.
