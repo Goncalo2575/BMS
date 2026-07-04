@@ -1,2 +1,0 @@
-../Core/Src/bms_master_comm.c:17:6:BMS_MasterComm_Init	16	static
-../Core/Src/bms_master_comm.c:30:6:BMS_MasterComm_PrintDebug	624	static

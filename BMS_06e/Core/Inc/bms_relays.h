@@ -57,6 +57,8 @@
 /* --- Entradas: monitorização --- */
 #define BMS_IMD_STATUS_PORT     GPIOB
 #define BMS_IMD_STATUS_PIN      GPIO_PIN_0
+#define BMS_IMD_Measure_PORT    GPIOB
+#define BMS_IMD_Measure_PIN     GPIO_PIN_1
 #define BMS_TSMS_PORT           GPIOC         
 #define BMS_TSMS_PIN            GPIO_PIN_8
 #define BMS_ESDB_PORT           GPIOC

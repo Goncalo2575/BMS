@@ -42,7 +42,6 @@
 #define BMS_FW_VERSION_MAJOR        3U
 #define BMS_FW_VERSION_MINOR        3U
 #define BMS_FW_VERSION_PATCH        0U
-#define BMS_FW_VERSION_STRING       "3.3.0"
 
 /* =========================================================================
  * CONFIGURAÇÃO GERAL DO SISTEMA
@@ -242,10 +241,10 @@
 #define ACTIVE_CELL_15S             0x0FU
 
 /* Thresholds de tensão dos comparadores autónomos de hardware (NMC)
- * V_OV = 2700 mV + OV_THRESH × 25 mV → 0x3E (62) = 4250 mV
+ * V_OV = 2700 mV + OV_THRESH × 25 mV → 0x3C (60) = 4200 mV
  * V_UV = 2100 mV + UV_THRESH × 25 mV → 0x24 (36) = 3000 mV */
-#define OV_THRESH_VAL               0x3EU   /* 4250 mV - Falha hardware de Sobretensão */
-#define UV_THRESH_VAL               0x24U   /* 3000 mV - Falha hardware de Subtensão */
+#define OV_THRESH_VAL               0x3CU   /* 4200 mV - Falha hardware de Sobretensão */
+#define UV_THRESH_VAL               0x24U   /* 3000 mV - Falha hardware de Subtensão */                     //no antigo esta a 2.5V      VER!!!!
 
 /* =========================================================================
  * BALANCEAMENTO CELULAR PASSIVO (BQ79616-Q1)
@@ -279,11 +278,11 @@
 /* =========================================================================
  * LIMITES DE TENSÃO E TEMPERATURA (Software)
  * ========================================================================= */
-#define CELL_OV_MV                  4250U   /* Falha por Sobretensão absoluta (Over-Voltage): 4.25 V */
-#define CELL_UV_MV                  3000U   /* Falha por Subtensão absoluta (Under-Voltage): 3.00 V */
+#define CELL_OV_MV                  4000U   /* Falha por Sobretensão absoluta (Over-Voltage): 4.20 V */
+#define CELL_UV_MV                  3000U   /* Falha por Subtensão absoluta (Under-Voltage): 3.00 V */                      //no antigo esta a 2.5V     VER!!!!
 #define CELL_WARN_UV_MV             3100U    /* 3100 mV - aviso subtensão (reservado) */
 #define CELL_WARN_OV_MV             4150U    /* 4150 mV - aviso de sobretensão (aproximação do limite) */
-#define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */
+#define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */                                                //no antigo esta a 70V      VER!!!!
 #define CELL_TEMP_WARN_C            55U      /* 55°C - aviso temperatura */
 #define CELL_IMBALANCE_MV           50U      /* 50 mV - desequilíbrio máximo */
 

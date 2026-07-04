@@ -243,7 +243,7 @@ void BMS_Main(void)
     /* ------------------------------------------------------------------
      * FASE 1: Inicialização do BMS
      * ------------------------------------------------------------------ */
-    printf("\r\n[BMS] Firmware v%s\r\n", BMS_FW_VERSION_STRING);
+    printf("\r\n[BMS] Firmware \r\n");
     printf("[BMS] Config: %u slaves x %u cells = %u total\r\n",
            BMS_NUM_SLAVES, BMS_CELLS_PER_SLAVE, BMS_TOTAL_CELLS);
 
