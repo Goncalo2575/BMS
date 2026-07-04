@@ -1,0 +1,2 @@
+../Core/Src/bms_master_comm.c:28:6:BMS_MasterComm_Init	3
+../Core/Src/bms_master_comm.c:37:6:BMS_MasterComm_PrintDebug	19

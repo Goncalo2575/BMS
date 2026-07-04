@@ -1,0 +1,8 @@
+../Core/Src/pl455.c:27:6:WakePL455	8	static
+../Core/Src/pl455.c:195:7:hexToFloat	0	static
+../Core/Src/pl455.c:215:8:Voltages	32	dynamic
+../Core/Src/pl455.c:281:6:getcellVoltages	16	static
+../Core/Src/pl455.c:327:10:CRC16	12	static
+../Core/Src/pl455.c:127:5:WriteFrame	64	static
+../Core/Src/pl455.c:114:5:WriteReg	40	static
+../Core/Src/pl455.c:20:6:powerDown	16	static

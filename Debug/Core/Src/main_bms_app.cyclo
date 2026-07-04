@@ -1,4 +1,4 @@
-../Core/Src/main_bms_app.c:53:13:BMS_ContactorControl	6
-../Core/Src/main_bms_app.c:80:21:BMS_ClearHardwareFaultLatches	3
-../Core/Src/main_bms_app.c:103:13:BMS_FaultRecoveryAttempt	15
-../Core/Src/main_bms_app.c:182:6:BMS_Main	14
+../Core/Src/main_bms_app.c:57:13:BMS_ContactorControl	8
+../Core/Src/main_bms_app.c:95:21:BMS_ClearHardwareFaultLatches	3
+../Core/Src/main_bms_app.c:131:13:BMS_FaultRecoveryAttempt	15
+../Core/Src/main_bms_app.c:233:6:BMS_Main	14

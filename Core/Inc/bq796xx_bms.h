@@ -4,13 +4,12 @@
  *          Topologia: Anel Daisy-Chain Isolado (Ring)
  *          Configuração: 2 Slaves x 15 células = 30 células totais (NMC, 4.20 V)
  *
- *  ARQUITECTURA DE ACTUAÇÃO (v3.3 — ACTUALIZADA):
+ *  ARQUITECTURA DE ACTUAÇÃO:
  *  Esta camada (driver BQ796xx) continua a ser um MONITOR que DECIDE e
  *  REPORTA: calcula as decisões LÓGICAS de segurança (contactor_closed,
  *  bms_ok, precharge_ready) e guarda-as no handle; NÃO acciona pinos.
  *  A ACTUAÇÃO FÍSICA dos relés auxiliares/de segurança e do LED cluster é feita
- *  pelo módulo bms_relays.c, que corre NESTE MESMO MCU — já NÃO existe um módulo
- *  MASTER externo. A máquina de segurança SAFE/ENGAGED/CHARGING/NOT_SAFE
+ *  pelo módulo bms_relays.c. A máquina de segurança SAFE/ENGAGED/CHARGING/NOT_SAFE
  *  (bms_relays) lê estas decisões + a tensão do bus/pack e comanda o hardware.
  *  O Line_contactor (pack ↔ inversor) NÃO é actuado por este MCU: é fechado
  *  AUTONOMAMENTE pelo INVERSOR (Sevcon Gen4 Size 6) quando B+ atinge a tensão
@@ -18,20 +17,15 @@
  *  (desce B+); contactor_closed é apenas a expectativa interna de "tração
  *  activa" (gating de SoC/telemetria), não um comando.
  *
- *  ⚠ Isto SUPERSEDE a nota da v3.2 ("sem actuação GPIO neste MCU"). Esta
- *    alteração de arquitectura DEVE ser registada no FMEA/FTA do projecto.
- *
  *  PINOS USADOS NESTE MCU:
  *    PA0/PA1        UART4  (bridge BQ79600, 1 Mbps, DMA)
  *    PA2/PA3        USART2 (telemetria/debug TX-only, 115200)
  *    PA8            NFAULT (entrada, EXTI8 falling, pull-up)
- *    PA13/PA14/PB3  SWD/SWO (programação + trace; CubeMX "Trace Asynchronous SW")
+ *    PA13/PA14/PB3  SWD/SWO 
  *    Relés:   PC0 pré-carga  PC1 charge  PC2 descarga  PC4 BMS_relay  PA6 BMS_charge
  *    LED:     PA15 verde  PC11 vermelho  PC12 azul
  *    Monitor: PB0 IMD  PC8 TSMS  PC6 ESDB  PB14 ESDB_chg  PB12 charger_sig
  *  (mapa completo, polaridades e conflitos resolvidos: ver bms_relays.h)
- *
- * @version 3.3.0
  */
 
 #ifndef BQ796XX_BMS_H
@@ -48,7 +42,6 @@
 #define BMS_FW_VERSION_MAJOR        3U
 #define BMS_FW_VERSION_MINOR        3U
 #define BMS_FW_VERSION_PATCH        0U
-#define BMS_FW_VERSION_STRING       "3.3.0"
 
 /* =========================================================================
  * CONFIGURAÇÃO GERAL DO SISTEMA
@@ -81,7 +74,7 @@
  * servem de referência única da configuração e são usados na verificação.
  *
  * NOTA (actuação dos relés): a temporização longa da pré-carga (750 ms) NÃO
- * pode usar HAL_Delay no super-loop — excederia o timeout do IWDG. Em
+ * pode usar HAL_Delay no super-loop, excederia o timeout do IWDG. Em
  * bms_relays.c essa espera é NÃO-BLOQUEANTE (baseada em HAL_GetTick). */
 #define BMS_IWDG_PRESCALER          IWDG_PRESCALER_64
 #define BMS_IWDG_RELOAD             250U     /* ~500 ms timeout */
@@ -182,28 +175,13 @@
 /* =========================================================================
  * PRÉ-CARGA / TENSÃO HV DO BARRAMENTO (GPIO4 do Slave 1)
  * =========================================================================
- * BUG-FIX (v3.3): o divisor resistivo do barramento HV é 27.11, não 27. Usar
- * um inteiro (27U) introduzia ~0.4% de erro por defeito (a 126 V lia ~125.5 V),
- * o que desloca o limiar de pré-carga. Passou a ponto-fixo NUM/DEN:
+ * O divisor resistivo do barramento HV é 27.11.. Passou a ponto-fixo NUM/DEN:
  *     V_bus_mV = V_adc_mV × HV_BUS_ATTENUATION_NUM / HV_BUS_ATTENUATION_DEN
  * (sem overflow: V_adc_mV ≤ ~12500 mV → ×2711 ≈ 3.4e7, cabe em uint32). */
 #define HV_BUS_ATTENUATION_NUM      2711U     /* 27.11 × 100 */
 #define HV_BUS_ATTENUATION_DEN      100U
 #define PRECHARGE_THRESHOLD_MV      113400UL  /* 90% × 126 V (30S × 4.20 V) */
 
-/* =========================================================================
- * INTERLOCKS LÓGICOS (calculados aqui) + ACTUAÇÃO (módulo bms_relays)
- * =========================================================================
- * Esta camada calcula e guarda no handle as decisões LÓGICAS de segurança:
- *   hbms->contactor_closed, hbms->bms_ok, hbms->precharge_ready.
- * NÃO acciona pinos. O módulo bms_relays.c (mesmo MCU) consome estes valores
- * e a tensão do bus/pack para actuar fisicamente os relés e o LED cluster.
- * A telemetria USART2 reporta tanto a DECISÃO lógica (ctor/ok/pre) como o
- * ESTADO REAL dos relés (rly[...]) — ver bms_master_comm.c.
- *
- * Os antigos #define BMS_OK_PORT/PIN, PRECHARGE_OK_PORT/PIN e o contactor
- * em GPIOB foram removidos desta camada; a pinagem física de actuação vive
- * agora em bms_relays.h. */
 
 /* =========================================================================
  * PINO DE TX DA BRIDGE (controlo GPIO directo para pulsos WAKE/SHUTDOWN/RESET/COMM CLEAR)
@@ -263,10 +241,10 @@
 #define ACTIVE_CELL_15S             0x0FU
 
 /* Thresholds de tensão dos comparadores autónomos de hardware (NMC)
- * V_OV = 2700 mV + OV_THRESH × 25 mV → 0x3E (62) = 4250 mV
+ * V_OV = 2700 mV + OV_THRESH × 25 mV → 0x3C (60) = 4200 mV
  * V_UV = 2100 mV + UV_THRESH × 25 mV → 0x24 (36) = 3000 mV */
-#define OV_THRESH_VAL               0x3EU   /* 4250 mV - Falha hardware de Sobretensão */
-#define UV_THRESH_VAL               0x24U   /* 3000 mV - Falha hardware de Subtensão */
+#define OV_THRESH_VAL               0x3CU   /* 4200 mV - Falha hardware de Sobretensão */
+#define UV_THRESH_VAL               0x24U   /* 3000 mV - Falha hardware de Subtensão */                     //no antigo esta a 2.5V      VER!!!!
 
 /* =========================================================================
  * BALANCEAMENTO CELULAR PASSIVO (BQ79616-Q1)
@@ -300,11 +278,11 @@
 /* =========================================================================
  * LIMITES DE TENSÃO E TEMPERATURA (Software)
  * ========================================================================= */
-#define CELL_OV_MV                  4250U   /* Falha por Sobretensão absoluta (Over-Voltage): 4.25 V */
-#define CELL_UV_MV                  3000U   /* Falha por Subtensão absoluta (Under-Voltage): 3.00 V */
+#define CELL_OV_MV                  4000U   /* Falha por Sobretensão absoluta (Over-Voltage): 4.20 V */
+#define CELL_UV_MV                  3000U   /* Falha por Subtensão absoluta (Under-Voltage): 3.00 V */                      //no antigo esta a 2.5V     VER!!!!
 #define CELL_WARN_UV_MV             3100U    /* 3100 mV - aviso subtensão (reservado) */
 #define CELL_WARN_OV_MV             4150U    /* 4150 mV - aviso de sobretensão (aproximação do limite) */
-#define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */
+#define CELL_TEMP_MAX_C             60U      /* 60°C - temperatura máxima */                                                //no antigo esta a 70V      VER!!!!
 #define CELL_TEMP_WARN_C            55U      /* 55°C - aviso temperatura */
 #define CELL_IMBALANCE_MV           50U      /* 50 mV - desequilíbrio máximo */
 
@@ -392,7 +370,7 @@ typedef struct {
     bool                ring_intact;            /* Anel fisicamente completo */
     bool                ring_using_reverse;     /* Testemunha: firmware a usar DIR1 após ring break */
 
-    /* DECISÕES LÓGICAS (consumidas por bms_relays para actuar) */
+    /* DECISÕES LÓGICAS */
     volatile bool       contactor_closed;       /* DECISÃO: contactor deve estar fechado?
                                                  * (escrito na ISR NFAULT → volatile) */
     bool                bms_ok;                 /* INTERLOCK lógico BMS_OK */

@@ -7,21 +7,14 @@
  *  bms_relays.c). A máquina de estados SAFE/ENGAGED/CHARGING/NOT_SAFE comanda
  *  pré-carga, descarga, relé do carregador, BMS_relay/BMS_charge e o LED cluster.
  *
- *  ⚠ Isto SUPERSEDE a nota "decide e reporta, sem actuação" da v3.2.0: este MCU
- *  passou a ser o actuador dos relés. Actualizar o FMEA/FTA.
+ *  ⚠ Isto SUPERSEDE a nota "decide e reporta, sem actuação": este MCU
+ *  passou a ser o actuador dos relés.
  *
  *  PINOUT (ver bms_relays.h para o mapa completo e conflitos a confirmar):
  *    PA0/PA1 UART4 (bridge)   PA2/PA3 USART2 (debug TX)   PA8 NFAULT
  *    Relés:  PC0 pré-carga  PC1 charge  PC2 descarga  PC4 BMS_relay  PA6 BMS_charge
  *    LED:    PA15 verde  PC11 vermelho  PC12 azul
  *    Monitor:PB0 IMD  PC8 TSMS  PC6 ESDB  PB14 ESDB_chg  PB12 charger_sig
- *
- *  CONFIG CubeMX (84 MHz): ver bms_relays.h e a nota abaixo.
- *  SYS Debug = Trace Asynchronous SW (reserva PA13=SWDIO, PA14=SWCLK, PB3=SWO;
- *  liberta PA15/JTDI para o LED verde). IWDG ~500 ms (a pré-carga do ENGAGED
- *  é não-bloqueante).
- *
- * @version 3.3.0
  */
 
 #include "bq796xx_bms.h"
@@ -59,7 +52,7 @@ extern TIM_HandleTypeDef   htim2;    /* TIM2  — Delay µs (contador livre) */
  * "tração activa" em operação normal (MONITORING ou BALANCING, sem falhas) e
  * desde que NÃO esteja a carregar — passando pelas barreiras de
  * BMS_ContactorClose — e "inactiva" em qualquer outro caso (incluindo CHARGING,
- * por separação total tração/carga — D.5.3.7).
+ * por separação total tração/carga).
  */
 static void BMS_ContactorControl(BMS_Handle_t *hbms)
 {
@@ -250,12 +243,12 @@ void BMS_Main(void)
     /* ------------------------------------------------------------------
      * FASE 1: Inicialização do BMS
      * ------------------------------------------------------------------ */
-    printf("\r\n[BMS] Firmware v%s\r\n", BMS_FW_VERSION_STRING);
+    printf("\r\n[BMS] Firmware \r\n");
     printf("[BMS] Config: %u slaves x %u cells = %u total\r\n",
            BMS_NUM_SLAVES, BMS_CELLS_PER_SLAVE, BMS_TOTAL_CELLS);
 
     /* Relés + LED em estado seguro ANTES de tudo (BMS relay fechado, contactores
-     * abertos, LEDs apagados). Independente do CubeMX. */
+     * abertos, LEDs apagados). */
     BMS_Relays_Init();
     printf("[BMS] Relays/LED init OK (safe-state)\r\n");
 

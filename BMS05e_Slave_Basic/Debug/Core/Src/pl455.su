@@ -1,0 +1,11 @@
+../Core/Src/pl455.c:35:6:wakeUp	8	static
+../Core/Src/pl455.c:44:6:powerDown	16	static
+../Core/Src/pl455.c:49:5:WriteReg	64	static
+../Core/Src/pl455.c:62:5:WriteFrame	64	static
+../Core/Src/pl455.c:167:10:CRC16	24	static
+../Core/Src/pl455.c:180:10:CRC16_CCITT_FALSE	32	static
+../Core/Src/pl455.c:198:6:setupSlave	16	static
+../Core/Src/pl455.c:390:6:setup_EEPROM	16	static
+../Core/Src/pl455.c:480:6:dataSlave	264	static
+../Core/Src/pl455.c:567:8:dataSlave_auxiliar	40	static
+../Core/Src/pl455.c:609:7:hexToFloat	24	static
